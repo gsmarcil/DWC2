@@ -1,0 +1,33 @@
+R1A-EVIDENCE-PIPELINE v4.2 clean-room pre-runtime results
+
+Integrity / packaging
+  top-level nested component SHA256SUMS pinned by top-level manifest
+  duplicate identity gate                         PASS
+  code-derived documentation contract             PASS
+  contract mutation selftest                      5/5 PASS
+  epoch runtime contract                          PASS
+
+Host
+  -O2 -Wall -Wextra -Werror                       PASS
+  built-in/selftest suite                         PASS
+  direct epoch JSON intake                        PASS
+  epoch->host integration mutations               6/6 PASS
+
+Evidence pipeline
+  manifest                                        67/67 PASS
+  gate binding                                     7/7 PASS
+  verdict                                         19/19 PASS
+  wire/holder                                      4/4 PASS
+  end-to-end pipeline                              5/5 PASS
+  epoch freezer                                    8/8 PASS
+
+Kernel package (local mode)
+  integrity / ABI / portability / property guard  PASS
+  P4                                              26/26 PASS
+  real-tree re-derivation                         NOT RUN without a Linux tree
+
+Runtime boundary
+  R1A                                             NOT EXECUTED
+  R2 / D_issue                                    UNKNOWN
+  R3 / D_commit                                   UNKNOWN
+  security impact                                 UNKNOWN
