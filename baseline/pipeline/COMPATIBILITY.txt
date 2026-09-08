@@ -1,0 +1,7 @@
+Kernel observer: unchanged r3 / semantic ABI v9 (112-byte header, 80-byte record).
+Original r1_gate_v9.py is retained byte-for-byte.
+Expected sha256:
+358b3abd8c76f478cab7f8487906715091ab2372de7db0f0a178829597a2b1db  r1_gate_v9.py
+
+v9.1 is a binding wrapper: it changes the evidence epoch, not the kernel ABI.
+Old negative counts collected under v9-only plumbing must not be carried into this epoch.

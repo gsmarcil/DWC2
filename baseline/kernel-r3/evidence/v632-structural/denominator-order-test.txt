@@ -1,0 +1,22 @@
+episodes:
+  sync, same task      -> should credit cfg0
+  sync, same task      -> should credit cfg0
+  sync, foreign task   -> should credit NOTHING
+  sync, foreign task   -> should credit NOTHING
+  delayed window       -> should credit delayed_disable
+  delayed window       -> should credit delayed_disable
+
+counter                        v6.3.1   v6.3.2
+cfg0                                6        2
+delayed_disable                     0        2
+overlap_count                       2        2
+
+expected v6.3.1: cfg0=6 (all six credited), delayed_disable=0
+expected v6.3.2: cfg0=2, delayed_disable=2, 2 overlaps dropped
+
+ok  : v6.3.1 credited all 6 stops to cfg0 and never incremented delayed_disable
+      -> both guarded branches were unreachable
+ok  : v6.3.2 credits 2 to cfg0, 2 to delayed_disable, and drops 2 overlaps
+
+DENOMINATOR ORDER TEST: PASS
+exit status: 0

@@ -1,0 +1,62 @@
+From: DWC2 R1 validation <noreply@example.com>
+Subject: [FIXUP v2] dwc2: r1 observer -- drop .llseek from dwc2_r1_reset_fops
+
+Supersedes the earlier fixup that rewrote .llseek = no_llseek into
+.llseek = noop_llseek.  That fixup restored the build but INVERTED the
+semantics, and is withdrawn.
+
+Build failure being fixed (observer=y, ARCH=arm):
+
+  drivers/usb/dwc2/gadget.c:647:19: error: 'no_llseek' undeclared here
+      (not in a function); did you mean 'noop_llseek'?
+
+Why deleting the line is the correct repair, proven only from the source
+tree at f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8:
+
+  fs/open.c:943    f->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
+  fs/open.c:958      if ((f->f_mode & FMODE_LSEEK) && !f->f_op->llseek)
+  fs/open.c:959              f->f_mode &= ~FMODE_LSEEK;
+
+  fs/read_write.c:387  loff_t vfs_llseek(struct file *file, loff_t offset, int whence)
+  fs/read_write.c:388  {
+  fs/read_write.c:389          if (!(file->f_mode & FMODE_LSEEK))
+  fs/read_write.c:390                  return -ESPIPE;
+  fs/read_write.c:391          return file->f_op->llseek(file, offset, whence);
+  fs/read_write.c:392  }
+
+A NULL .llseek therefore makes do_dentry_open() clear FMODE_LSEEK, and
+vfs_llseek() returns -ESPIPE.  That is exactly what the removed no_llseek
+body did.
+
+noop_llseek does the opposite:
+
+  fs/read_write.c:326  loff_t noop_llseek(struct file *file, loff_t offset, int whence)
+  fs/read_write.c:327  {
+  fs/read_write.c:328          return file->f_pos;
+  fs/read_write.c:329  }
+
+It leaves FMODE_LSEEK set and makes lseek(2) SUCCEED, returning f_pos.
+dwc2_r1_reset_open() does not call nonseekable_open(), so nothing else
+clears FMODE_LSEEK; noop_llseek would have silently changed the node's
+ABI from "not seekable" to "seekable, seeks ignored".
+
+  Documentation/filesystems/porting.rst:914
+    no_llseek is gone; don't set .llseek to that - just leave it NULL instead.
+
+dwc2_r1_trace_fops is deliberately NOT touched: it keeps
+.llseek = default_llseek, both because dwc2_r1_trace_read() uses
+simple_read_from_buffer() and honours *ppos, and because it serves as the
+negative control for the ESPIPE probe.
+
+TEST-ONLY.  Not for submission.
+---
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -644,7 +644,6 @@ static const struct file_operations dwc2_r1_reset_fops = {
+ 	.owner = THIS_MODULE,
+ 	.open = dwc2_r1_reset_open,
+ 	.write = dwc2_r1_reset_write,
+-	.llseek = no_llseek,
+ };
+ 
+ void dwc2_r1_debugfs_init(struct dwc2_hsotg *hsotg)

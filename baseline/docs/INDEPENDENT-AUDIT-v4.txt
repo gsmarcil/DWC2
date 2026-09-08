@@ -1,0 +1,61 @@
+DWC2 R1A v4 — independent pre-runtime audit
+Date: 2026-09-08
+Pin: torvalds/linux@f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+
+FINAL ARCHIVES
+916416309bab5d11787afa7da13f0bb21be1f0669fbd247ec35ed6ecd725fe0e  r1a-host-v4.tar.gz
+35b9dd6c10689d30c9073c5239867d33b0373b7661564fb80a312764afb7fb4d  r1-evidence-pipeline-v4.tar.gz
+f1690e3626cee3107c7d82f4179fb7212f96028f4fe309bfddc25e65b3ba533c  R1A-V4-PRE-RUNTIME-FREEZE.tar.gz
+
+FREEZE CONTENT HASHES
+1cee79c61f8b1e788d01f293cabfe4b4f257ba0c95ca3f44c5dc464115166f33  R1A-V4-FROZEN-STATE.md
+9661902d5ca10fcbb77dd0641da54c2dddc90e0d85a78159f8ffbf92cc422388  dwc2-r1-v6.3.2-p4-r3.tar.gz
+35b9dd6c10689d30c9073c5239867d33b0373b7661564fb80a312764afb7fb4d  r1-evidence-pipeline-v4.tar.gz
+916416309bab5d11787afa7da13f0bb21be1f0669fbd247ec35ed6ecd725fe0e  r1a-host-v4.tar.gz
+
+FRESH-EXTRACT RESULTS
+host build -O2 -Wall -Wextra -Werror      PASS
+host selftest                             PASS
+host VERIFY                               PASS (runtime not executed)
+manifest selftest                         67/67 PASS
+gate binding selftest                     7/7 PASS
+verdict selftest                          19/19 PASS
+wire/holder witness selftest              4/4 PASS
+pipeline mutation selftest                5/5 PASS
+evidence pipeline VERIFY                  PASS (runtime not executed)
+P4 selftest                               26/26 PASS
+
+RULE DISCRIMINATION
+re-arm C/Python crosscheck                 560/560 PASS
+denominator C/Python crosscheck            768/768 PASS
+combined rows                             1328/1328 PASS
+B=0 deliberately broken                    detected; RC=1
+cross-session holder                        rejected
+changed usbmon capture                      rejected at wire verifier
+changed S2 trace                            rejected at gate
+changed manifest after gate                 rejected at verdict
+
+PREVIOUS BLOCKERS CLOSED
+- holder event log bound by SHA256 + session_id + boot_id
+- witness tools and gate wrapper pinned in EPOCH_ARTIFACTS
+- gate v9.1 consumes and revalidates manifest directly; no bridge trust boundary
+- S1.count..S2.count campaign-only record slice
+- sensitivity derived from S0/S1 causal_sync and setup counters
+- measured k controls campaign denominator, including raw restore pollution
+- B_valid == 0 rejected before equality
+- usbmon capture finalization is a fatal barrier before hashing
+- S0/S1/S2 all require atomic snapshots and one reset generation
+- trigger RC load-bearing in re-arm preflight
+- extra matching wire controls and extra holder teardowns rejected
+
+UNCHANGED BOUNDARY
+Kernel observer r3 / ABI v9 unchanged.
+No real USB/DWC2 runtime was executed.
+R1A runtime: NOT EXECUTED
+R2 / D_issue: UNKNOWN
+R3 / D_commit: UNKNOWN
+Security impact: UNKNOWN
+
+FINAL PRE-RUNTIME VERDICT
+TOOLCHAIN / EVIDENCE PIPELINE = CLOSED
+ONLY REAL DWC2 RUNTIME REMAINS

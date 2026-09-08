@@ -1,0 +1,33 @@
+scope audit v2: /home/claude/k/drivers/usb/dwc2/gadget.c
+probes found: 28
+
+ok     line 367   if (!r1 || !dwc2_r1_trackable_out_ep(hs_ep))         previous stmt is a plain statement
+ok     line 384   if (!hsotg->r1 || continuing || !dwc2_r1_trackable   preceded by block boundary
+ok     line 438   trigger = dwc2_r1_classify_setup(ctrl);              previous stmt is a plain statement
+ok     line 439   dwc2_r1_clear_setup(r1);                             previous stmt is a plain statement
+ok     line 495   dwc2_r1_clear_setup(r1);                             preceded by block boundary
+ok     line 516   dwc2_r1_clear_setup(r1);                             previous stmt is a plain statement
+ok     line 564   * before dwc2_r1_stop_enter(), which is the only w   preceded by block boundary
+ok     line 565   * episode had ended with dwc2_r1_stop_exit() setti   preceded by block boundary
+ok     line 582   !dwc2_r1_trackable_out_ep(hs_ep) || !(ctrl & DXEPC   continuation line
+ok     line 691   * so dwc2_r1_note_disable_candidate() never sees i   preceded by block boundary
+ok     line 718   !dwc2_r1_trackable_out_ep(hs_ep) ||                  continuation line
+ok     line 745   if (!r1 || !dwc2_r1_trackable_out_ep(hs_ep))         previous stmt is a plain statement
+ok     line 749   rec = dwc2_r1_next_record_locked(hsotg);             previous stmt is a plain statement
+ok     line 820   mapping_class = dwc2_r1_classify_mapping(hs_req, &   previous stmt is a plain statement
+ok     line 926   * r1->count can never exceed the ring: dwc2_r1_nex   previous stmt is a plain statement
+ok     line 932   dwc2_r1_fill_header(hdr, r1, count);                 previous stmt is a plain statement
+ok     line 2178  dwc2_r1_mark_hw_programmed(hsotg, hs_ep, hs_req, c   previous stmt is a plain statement
+ok     line 2440  dwc2_r1_queue_lifecycle(hs, hs_ep, hs_req);          previous stmt is a plain statement
+ok     line 2441  dwc2_r1_ep0_queue_seen(hs, hs_ep);                   previous stmt is a plain statement
+ok     line 2948  dwc2_r1_setup_enter(hsotg, ctrl);                    preceded by block boundary
+ok     line 2952  dwc2_r1_setup_exit(hsotg, ret);                      previous stmt is a plain statement
+ok     line 4940  dwc2_r1_goutnak_timeout(hsotg, hs_ep);               preceded by block boundary
+ok     line 5241  u8 cause = dwc2_r1_stop_enter(hsotg, DWC2_R1_STOP_   preceded by block boundary
+ok     line 5243  dwc2_r1_note_disable_candidate(hsotg, hs_ep, ctrl,   previous stmt is a plain statement
+ok     line 5245  dwc2_r1_stop_exit(hsotg);                            previous stmt is a plain statement
+ok     line 5321  u8 cause = dwc2_r1_stop_enter(hs, DWC2_R1_STOP_DEQ   preceded by block boundary
+ok     line 5323  dwc2_r1_note_dequeue_candidate(hs, hs_ep, hs_req,    previous stmt is a plain statement
+ok     line 5325  dwc2_r1_stop_exit(hs);                               previous stmt is a plain statement
+
+SCOPE AUDIT v6.2: all 28 probes correctly scoped (0 for review)

@@ -1,0 +1,29 @@
+== sha256 ==
+ok   NIST vectors                                         rc=0
+
+== scope aborts (spec section 11) ==
+ok   descriptor DMA target rejected                       rc=2
+ok   lost records rejected                                rc=2
+ok   non-atomic snapshot rejected                         rc=2
+ok   ABI v8 rejected                                      rc=2
+ok   unknown mode rejected                                rc=2
+ok   delayed mode needs overlap 0                         rc=2
+ok   no device and no vid/pid                             rc=2
+ok   snapshot source required                             rc=2
+
+== host endpoint re-arm ==
+ok   two cycles cannot discriminate                       rc=2
+ok   65 cycles exceeds the array                          rc=2
+ok   two identical arms rejected                          rc=2
+ok   unknown reset method rejected                        rc=2
+ok   probe timeout floor enforced                         rc=2
+ok   RULE CROSSCHECK: PASS                               
+
+== manifest emission ==
+ok   selftest emits a manifest                            rc=0
+ok   only the two witnesses are missing                  
+
+== dump header and denominator window ==
+ok   header parser and window rule                        rc=0
+
+R1A_HOST SELFTEST: all passed

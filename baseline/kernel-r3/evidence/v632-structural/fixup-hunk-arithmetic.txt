@@ -1,0 +1,12 @@
+Hunk line-count arithmetic, shipped vs correct:
+
+/home/claude/theirs/dwc2_v632_p4/base/v62-llseek-fixup-v2.patch
+  declared: @@ -644,7 +644,6 @@ static const struct file_operations dwc2_r1_reset_fops = {
+  actual:   old=5 new=4
+  sha256:   8c5e42de4404021dc8a2b619a7a51aa73e19333a70726fbca3cc2d0edf5b93de
+
+v62-llseek-fixup-v2.patch
+  declared: @@ -644,7 +644,6 @@ static const struct file_operations dwc2_r1_reset_fops = {
+  actual:   old=7 new=6
+  sha256:   fba811973d8d9360cea3d6b34e9f063276abbb769fedb25a14bbe10cb52a185f
+

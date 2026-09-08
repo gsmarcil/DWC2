@@ -1,0 +1,581 @@
+diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
+index ba7dc3d16..f30cec1f7 100644
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -118,7 +118,7 @@ enum dwc2_r1_stop_caller {
+ 
+ #define DWC2_R1_RING_SIZE	256
+ #define DWC2_R1_DUMP_MAGIC	0x424f3152U
+-#define DWC2_R1_DUMP_VERSION	6U
++#define DWC2_R1_DUMP_VERSION	8U
+ 
+ #define DWC2_R1_F_REQ_PRESENT		BIT(0)
+ #define DWC2_R1_F_HW_PROGRAMMED	BIT(1)
+@@ -137,6 +137,73 @@ enum dwc2_r1_stop_caller {
+ #define DWC2_R1_F_DMAREQ		BIT(14)
+ #define DWC2_R1_F_GOUTNAKEFF_NOW	BIT(15)
+ 
++/*
++ * v6.3 provenance bits (rec.flags2).  Kept separate from rec.flags so the
++ * v6.2 bit assignments stay stable for anyone re-reading old dumps.
++ */
++#define DWC2_R1_F2_DMA_MAPPED		BIT(0)
++#define DWC2_R1_F2_SG_WAS_MAPPED	BIT(1)
++#define DWC2_R1_F2_BOUNCE_ACTIVE	BIT(2)
++#define DWC2_R1_F2_CORE_OWNED		BIT(3)
++#define DWC2_R1_F2_U_ELIG_LINEAR	BIT(4)
++#define DWC2_R1_F2_U_ELIG_SG		BIT(5)
++#define DWC2_R1_F2_SG_COUNT_OVERFLOW	BIT(6)
++
++/*
++ * Causal attribution.
++ *
++ * The owner token is the executing task, not the CPU.  An earlier version used
++ * smp_processor_id(), justified by the handler running in hardirq.  That
++ * justification does not hold in general:
++ *
++ *   gadget.c:5898  devm_request_irq(hsotg->dev, hsotg->irq, dwc2_hsotg_irq,
++ *                                   IRQF_SHARED, ...)
++ *
++ * carries no IRQF_NO_THREAD, and
++ *
++ *   kernel/irq/manage.c:1312  irq_setup_forced_threading()
++ *   kernel/irq/manage.c:1314          if (!force_irqthreads()) return 0;
++ *   kernel/irq/manage.c:1316          if (new->flags & (IRQF_NO_THREAD |
++ *                                         IRQF_PERCPU | IRQF_ONESHOT))
++ *                                             return 0;
++ *
++ * so with threadirqs= this handler is forced into a kthread, where it can be
++ * preempted and migrated.  Under that configuration a CPU comparison both
++ * misses a real overlap (the window migrates) and invents a false one, and
++ * worse, it can credit a stop from an unrelated task that was scheduled onto
++ * the same CPU.  Comparing `current` is correct in both configurations.
++ *
++ * The pointer is compared and never dereferenced, and never leaves the kernel:
++ * owner_cpu stays in the record as a diagnostic only.
++ */
++enum dwc2_r1_cause {
++	DWC2_R1_CAUSE_NONE = 0,		/* no setup window open */
++	DWC2_R1_CAUSE_SYNC_OWNER,	/* same CPU as the open setup */
++	DWC2_R1_CAUSE_DELAYED,		/* delayed-status window still open */
++	DWC2_R1_CAUSE_OVERLAP,		/* foreign CPU: fail closed */
++};
++
++/*
++ * Mapping ownership, frozen from usb_gadget_map_request_by_dev() and
++ * usb_gadget_unmap_request_by_dev() (udc/core.c:910 and :963):
++ *
++ *   length == 0            -> unmap returns immediately; nothing is undone
++ *   sg_was_mapped          -> the core did NOT create the mapping, and it also
++ *                             sets num_mapped_sgs = num_sgs, so that field
++ *                             alone is never proof of ownership
++ *   else num_sgs           -> dma_map_sg,     num_mapped_sgs > 0
++ *   else                   -> dma_map_single, dma_mapped = 1
++ */
++enum dwc2_r1_mapping {
++	DWC2_R1_MAP_NONE = 0,		/* no live request */
++	DWC2_R1_MAP_ZERO_LENGTH,	/* unmap would be a no-op */
++	DWC2_R1_MAP_NOT_CORE_OWNED,	/* sg_was_mapped */
++	DWC2_R1_MAP_LINEAR,		/* core-owned, single dma_addr_t */
++	DWC2_R1_MAP_SG,			/* core-owned, scatterlist */
++	DWC2_R1_MAP_INCONSISTENT_SG,	/* mapped sgs but no sgs */
++	DWC2_R1_MAP_UNKNOWN,
++};
++
+ #define DWC2_R1_CAP_G_DMA		BIT(0)
+ #define DWC2_R1_CAP_G_DMA_DESC		BIT(1)
+ 
+@@ -160,7 +227,8 @@ struct dwc2_r1_rec {
+ 	u8 b_request;
+ 	u8 trigger;
+ 	u8 ep_index;
+-	__le16 reserved;
++	u8 causal_state;	/* enum dwc2_r1_cause */
++	u8 mapping_class;	/* enum dwc2_r1_mapping */
+ 	__le32 gintsts;
+ 	__le32 dctl;
+ 	__le32 doepctl;
+@@ -168,6 +236,15 @@ struct dwc2_r1_rec {
+ 	__le32 grstctl;
+ 	__le32 gahbcfg;
+ 	__le32 status;
++	/* --- v6.3 --- */
++	__le64 setup_cookie;
++	__le64 req_dma;
++	__le32 req_length;
++	__le32 req_actual;
++	__le16 num_sgs;
++	__le16 num_mapped_sgs;
++	__le16 flags2;
++	__le16 owner_cpu;
+ };
+ 
+ struct dwc2_r1_state {
+@@ -193,6 +270,21 @@ struct dwc2_r1_state {
+ 	u32 candidate_cfg0_seen;
+ 	u32 candidate_cfgn_seen;
+ 	u32 candidate_intf_seen;
++	u32 candidate_delayed_disable_seen;
++	u32 candidate_delayed_dequeue_seen;
++	/* v6.3 causal window */
++	u64 setup_cookie_next;
++	u64 setup_cookie;
++	u8 setup_phase;			/* 0 none, 1 sync open, 2 delayed open */
++	u8 stop_causal;			/* enum dwc2_r1_cause for the open stop */
++	/* compared only, never dereferenced, never exported */
++	const void *setup_owner_task;
++	int setup_owner_cpu;		/* diagnostic only */
++	u32 overlap_count;
++	u32 delayed_open_count;
++	u32 delayed_closed_count;
++	u32 causal_sync_count;
++	u32 causal_unattributed_count;
+ 	struct dwc2_r1_rec ring[DWC2_R1_RING_SIZE];
+ };
+ 
+@@ -216,7 +308,22 @@ struct dwc2_r1_dump_hdr {
+ 	__le32 candidate_cfg0_seen;
+ 	__le32 candidate_cfgn_seen;
+ 	__le32 candidate_intf_seen;
+-	__le32 reserved;
++	__le32 candidate_delayed_disable_seen;
++	__le32 overlap_count;
++	__le32 delayed_open_count;
++	__le32 delayed_closed_count;
++	__le32 causal_sync_count;
++	__le32 causal_unattributed_count;
++	/*
++	 * 1 when the dump was taken under a single lock acquisition, so the
++	 * counters above and the records below are from the same instant.
++	 * v6.2 could not assert this: it read count, dropped the lock to
++	 * allocate, then re-took it to fill the header and copy a prefix, so
++	 * a header from T2 could accompany records from T1.
++	 */
++	__le32 snapshot_atomic;
++	__le32 candidate_delayed_dequeue_seen;
++	__le32 reserved1;
+ };
+ 
+ struct dwc2_r1_snapshot {
+@@ -224,8 +331,8 @@ struct dwc2_r1_snapshot {
+ 	u8 data[];
+ };
+ 
+-static_assert(sizeof(struct dwc2_r1_rec) == 48);
+-static_assert(sizeof(struct dwc2_r1_dump_hdr) == 80);
++static_assert(sizeof(struct dwc2_r1_rec) == 80);
++static_assert(sizeof(struct dwc2_r1_dump_hdr) == 112);
+ 
+ static bool dwc2_r1_trackable_out_ep(struct dwc2_hsotg_ep *hs_ep)
+ {
+@@ -312,6 +419,10 @@ static void dwc2_r1_clear_setup(struct dwc2_r1_state *r1)
+ 	r1->w_value = 0;
+ 	r1->w_index = 0;
+ 	r1->w_length = 0;
++	r1->setup_cookie = 0;
++	r1->setup_phase = 0;
++	r1->setup_owner_task = NULL;
++	r1->setup_owner_cpu = -1;
+ }
+ 
+ static void dwc2_r1_setup_enter(struct dwc2_hsotg *hsotg,
+@@ -330,6 +441,10 @@ static void dwc2_r1_setup_enter(struct dwc2_hsotg *hsotg,
+ 		return;
+ 
+ 	r1->trigger = trigger;
++	r1->setup_cookie = ++r1->setup_cookie_next;
++	r1->setup_phase = 1;
++	r1->setup_owner_task = current;
++	r1->setup_owner_cpu = smp_processor_id();
+ 	r1->bm_request_type = ctrl->bRequestType;
+ 	r1->b_request = ctrl->bRequest;
+ 	r1->w_value = le16_to_cpu(ctrl->wValue);
+@@ -351,24 +466,92 @@ static void dwc2_r1_setup_enter(struct dwc2_hsotg *hsotg,
+ 	}
+ }
+ 
+-static void dwc2_r1_setup_exit(struct dwc2_hsotg *hsotg)
++/*
++ * Called with the value setup() returned.  USB_GADGET_DELAYED_STATUS means the
++ * function has not finished acting on this request: f_mass_storage's
++ * fsg_set_alt() raises FSG_STATE_CONFIG_CHANGE and returns delayed, and only
++ * later does its worker call usb_ep_dequeue() on the live bulk-out request
++ * (f_mass_storage.c:2410 and :2466).  Clearing the trigger here -- what v6.2
++ * did unconditionally -- makes that dequeue unattributable.  So the window is
++ * held open, carrying its cookie, until it is explicitly closed.
++ */
++static void dwc2_r1_setup_exit(struct dwc2_hsotg *hsotg, int setup_ret)
+ {
+-	if (!hsotg->r1)
++	struct dwc2_r1_state *r1 = hsotg->r1;
++
++	if (!r1)
+ 		return;
+ 	lockdep_assert_held(&hsotg->lock);
+-	dwc2_r1_clear_setup(hsotg->r1);
++
++	if (r1->setup_phase == 1 && r1->trigger != DWC2_R1_TRIG_NONE &&
++	    setup_ret == USB_GADGET_DELAYED_STATUS) {
++		r1->setup_phase = 2;
++		r1->setup_owner_task = NULL;	/* no owner across the gap */
++		r1->setup_owner_cpu = -1;
++		r1->delayed_open_count++;
++		return;
++	}
++
++	dwc2_r1_clear_setup(r1);
++}
++
++/*
++ * Close of the delayed window.  usb_composite_setup_continue() completes a
++ * delayed status by queueing on gadget->ep0 (composite.c:1583), which lands
++ * here.  Any other ep0 queue also closes it: closing early is fail-closed,
++ * because it can only turn a delayed attribution into no attribution, never
++ * the reverse.  Always called with hsotg->lock held -- .queue is
++ * dwc2_hsotg_ep_queue_lock (gadget.c:5073), and the internal ep0 queue at
++ * gadget.c:2639 is already under the lock.
++ */
++static void dwc2_r1_ep0_queue_seen(struct dwc2_hsotg *hsotg,
++				   struct dwc2_hsotg_ep *hs_ep)
++{
++	struct dwc2_r1_state *r1 = hsotg->r1;
++
++	if (!r1 || hs_ep->index || r1->setup_phase != 2)
++		return;
++	lockdep_assert_held(&hsotg->lock);
++	r1->delayed_closed_count++;
++	dwc2_r1_clear_setup(r1);
+ }
+ 
++/*
++ * Decide, at the moment the stop begins, whether this stop can be attributed
++ * to the setup window that happens to be open.  Fail closed: a stop on a
++ * different CPU while a synchronous window is open is concurrent with the
++ * callback, not caused by it, and is recorded as OVERLAP.
++ */
+ static void dwc2_r1_stop_enter(struct dwc2_hsotg *hsotg, u8 caller)
+ {
+-	if (hsotg->r1)
+-		hsotg->r1->stop_caller = caller;
++	struct dwc2_r1_state *r1 = hsotg->r1;
++
++	if (!r1)
++		return;
++	r1->stop_caller = caller;
++
++	if (r1->setup_phase == 1) {
++		if (r1->setup_owner_task == current) {
++			r1->stop_causal = DWC2_R1_CAUSE_SYNC_OWNER;
++			r1->causal_sync_count++;
++		} else {
++			r1->stop_causal = DWC2_R1_CAUSE_OVERLAP;
++			r1->overlap_count++;
++		}
++	} else if (r1->setup_phase == 2) {
++		r1->stop_causal = DWC2_R1_CAUSE_DELAYED;
++	} else {
++		r1->stop_causal = DWC2_R1_CAUSE_NONE;
++		r1->causal_unattributed_count++;
++	}
+ }
+ 
+ static void dwc2_r1_stop_exit(struct dwc2_hsotg *hsotg)
+ {
+-	if (hsotg->r1)
++	if (hsotg->r1) {
+ 		hsotg->r1->stop_caller = DWC2_R1_STOP_NONE;
++		hsotg->r1->stop_causal = DWC2_R1_CAUSE_NONE;
++	}
+ }
+ 
+ /* Uses only the stock ep_disable() DOEPCTL read; no new pre-wait MMIO. */
+@@ -390,6 +573,15 @@ static void dwc2_r1_note_disable_candidate(struct dwc2_hsotg *hsotg,
+ 	    !hs_req->req.length || hs_req->req.status != -EINPROGRESS)
+ 		return;
+ 
++	/* An unattributable stop must not be credited to any trigger. */
++	if (r1->stop_causal == DWC2_R1_CAUSE_OVERLAP)
++		return;
++
++	if (r1->stop_causal == DWC2_R1_CAUSE_DELAYED) {
++		r1->candidate_delayed_disable_seen++;
++		return;
++	}
++
+ 	switch (r1->trigger) {
+ 	case DWC2_R1_TRIG_SET_CONFIG_ZERO:
+ 		r1->candidate_cfg0_seen++;
+@@ -405,6 +597,115 @@ static void dwc2_r1_note_disable_candidate(struct dwc2_hsotg *hsotg,
+ 	}
+ }
+ 
++/*
++ * Classify what usb_gadget_unmap_request() would actually do to this request,
++ * using the same tests udc/core.c uses, in the same order.  Returns the class
++ * and ORs the matching provenance bits into *f2.
++ */
++static u8 dwc2_r1_classify_mapping(struct dwc2_hsotg_req *hs_req, u16 *f2)
++{
++	struct usb_request *req;
++
++	if (!hs_req)
++		return DWC2_R1_MAP_NONE;
++
++	req = &hs_req->req;
++	if (req->dma_mapped)
++		*f2 |= DWC2_R1_F2_DMA_MAPPED;
++	if (req->sg_was_mapped)
++		*f2 |= DWC2_R1_F2_SG_WAS_MAPPED;
++	if (hs_req->saved_req_buf)
++		*f2 |= DWC2_R1_F2_BOUNCE_ACTIVE;
++
++	/*
++	 * num_sgs and num_mapped_sgs are unsigned int in struct usb_request
++	 * (include/linux/usb/gadget.h:109-110) but 16 bits in the record.  Flag
++	 * the truncation rather than let an analyzer read a wrapped count as a
++	 * real one.
++	 */
++	if (req->num_sgs > U16_MAX || req->num_mapped_sgs > U16_MAX)
++		*f2 |= DWC2_R1_F2_SG_COUNT_OVERFLOW;
++
++	/* udc/core.c:966 tests length first: a zero-length unmap does nothing */
++	if (!req->length)
++		return DWC2_R1_MAP_ZERO_LENGTH;
++
++	/*
++	 * sg_was_mapped means the core did not create this mapping, and
++	 * udc/core.c:917 still sets num_mapped_sgs = num_sgs, so that field on
++	 * its own is never evidence of ownership -- only after this test is it
++	 * usable.
++	 */
++	if (req->sg_was_mapped)
++		return DWC2_R1_MAP_NOT_CORE_OWNED;
++
++	/*
++	 * From here the branches follow udc/core.c:969-978 exactly:
++	 *
++	 *	if (req->num_mapped_sgs)	dma_unmap_sg
++	 *	else if (req->dma_mapped)	dma_unmap_single
++	 *
++	 * so the gate is num_mapped_sgs, not num_sgs.  An earlier version
++	 * branched on num_sgs; that usually agrees, but it is not what unmap
++	 * tests, and the claim of matching it was therefore untrue.
++	 */
++	if (req->num_mapped_sgs) {
++		if (!req->num_sgs)
++			return DWC2_R1_MAP_INCONSISTENT_SG;
++		*f2 |= DWC2_R1_F2_CORE_OWNED | DWC2_R1_F2_U_ELIG_SG;
++		return DWC2_R1_MAP_SG;
++	}
++
++	if (req->dma_mapped) {
++		*f2 |= DWC2_R1_F2_CORE_OWNED | DWC2_R1_F2_U_ELIG_LINEAR;
++		return DWC2_R1_MAP_LINEAR;
++	}
++
++	return DWC2_R1_MAP_UNKNOWN;
++}
++
++/*
++ * Denominator for the delayed-dequeue path.
++ *
++ * f_mass_storage reaches stop_xfr through usb_ep_dequeue(), not ep_disable(),
++ * so dwc2_r1_note_disable_candidate() never sees it and there was no way to
++ * say "0 timeouts out of N valid attempts" for that path at all.
++ *
++ * This uses only software state -- no extra MMIO before the wait, which is the
++ * property the whole observer is built around.  The endpoint type comes from
++ * hs_ep->ep.desc rather than a DOEPCTL read.
++ *
++ * ASYMMETRY, on purpose and recorded: the disable-path candidate confirms
++ * DXEPCTL_EPENA and DXEPCTL_EPTYPE_BULK from a register read the driver was
++ * making anyway.  Here there is no such read, so this counter is a slightly
++ * weaker denominator.  The two are kept in separate header fields so an
++ * analyzer can never add them together.
++ */
++static void dwc2_r1_note_dequeue_candidate(struct dwc2_hsotg *hsotg,
++					   struct dwc2_hsotg_ep *hs_ep,
++					   struct dwc2_hsotg_req *hs_req)
++{
++	struct dwc2_r1_state *r1 = hsotg->r1;
++	const struct usb_endpoint_descriptor *desc;
++
++	if (!r1 || r1->trigger == DWC2_R1_TRIG_NONE ||
++	    r1->setup_phase != 2 ||
++	    !dwc2_r1_trackable_out_ep(hs_ep) ||
++	    !using_dma(hsotg) || using_desc_dma(hsotg))
++		return;
++
++	desc = hs_ep->ep.desc;
++	if (!desc || !usb_endpoint_xfer_bulk(desc))
++		return;
++
++	if (!hs_req || hs_req != hs_ep->req ||
++	    !hs_req->trace_seq || !hs_req->trace_hw_programmed ||
++	    !hs_req->req.length || hs_req->req.status != -EINPROGRESS)
++		return;
++
++	r1->candidate_delayed_dequeue_seen++;
++}
++
+ static void dwc2_r1_goutnak_timeout(struct dwc2_hsotg *hsotg,
+ 				    struct dwc2_hsotg_ep *hs_ep)
+ {
+@@ -413,7 +714,8 @@ static void dwc2_r1_goutnak_timeout(struct dwc2_hsotg *hsotg,
+ 	struct dwc2_r1_rec *rec;
+ 	u32 gintsts, dctl, epctl, epint, grstctl, gahbcfg;
+ 	u32 status = 0, seq = 0;
+-	u16 flags = 0;
++	u16 flags = 0, flags2 = 0;
++	u8 mapping_class;
+ 
+ 	if (!r1 || !dwc2_r1_trackable_out_ep(hs_ep))
+ 		return;
+@@ -488,6 +790,21 @@ static void dwc2_r1_goutnak_timeout(struct dwc2_hsotg *hsotg,
+ 	rec->grstctl = cpu_to_le32(grstctl);
+ 	rec->gahbcfg = cpu_to_le32(gahbcfg);
+ 	rec->status = cpu_to_le32(status);
++
++	/* v6.3: causal identity and DMA provenance */
++	mapping_class = dwc2_r1_classify_mapping(hs_req, &flags2);
++	rec->causal_state = r1->stop_causal;
++	rec->mapping_class = mapping_class;
++	rec->flags2 = cpu_to_le16(flags2);
++	rec->owner_cpu = cpu_to_le16((u16)smp_processor_id());
++	rec->setup_cookie = cpu_to_le64(r1->setup_cookie);
++	if (hs_req) {
++		rec->req_dma = cpu_to_le64((u64)hs_req->req.dma);
++		rec->req_length = cpu_to_le32(hs_req->req.length);
++		rec->req_actual = cpu_to_le32(hs_req->req.actual);
++		rec->num_sgs = cpu_to_le16((u16)hs_req->req.num_sgs);
++		rec->num_mapped_sgs = cpu_to_le16((u16)hs_req->req.num_mapped_sgs);
++	}
+ }
+ 
+ static int dwc2_r1_init(struct dwc2_hsotg *hsotg)
+@@ -498,6 +815,7 @@ static int dwc2_r1_init(struct dwc2_hsotg *hsotg)
+ 	if (!r1)
+ 		return -ENOMEM;
+ 
++	r1->setup_owner_cpu = -1;
+ 	r1->gsnpsid = dwc2_readl(hsotg, GSNPSID);
+ 	r1->ghwcfg2 = dwc2_readl(hsotg, GHWCFG2);
+ 	r1->ghwcfg3 = dwc2_readl(hsotg, GHWCFG3);
+@@ -533,6 +851,17 @@ static void dwc2_r1_fill_header(struct dwc2_r1_dump_hdr *hdr,
+ 	hdr->candidate_cfg0_seen = cpu_to_le32(r1->candidate_cfg0_seen);
+ 	hdr->candidate_cfgn_seen = cpu_to_le32(r1->candidate_cfgn_seen);
+ 	hdr->candidate_intf_seen = cpu_to_le32(r1->candidate_intf_seen);
++	hdr->candidate_delayed_disable_seen =
++		cpu_to_le32(r1->candidate_delayed_disable_seen);
++	hdr->candidate_delayed_dequeue_seen =
++		cpu_to_le32(r1->candidate_delayed_dequeue_seen);
++	hdr->overlap_count = cpu_to_le32(r1->overlap_count);
++	hdr->delayed_open_count = cpu_to_le32(r1->delayed_open_count);
++	hdr->delayed_closed_count = cpu_to_le32(r1->delayed_closed_count);
++	hdr->causal_sync_count = cpu_to_le32(r1->causal_sync_count);
++	hdr->causal_unattributed_count =
++		cpu_to_le32(r1->causal_unattributed_count);
++	hdr->snapshot_atomic = cpu_to_le32(1);
+ }
+ 
+ static int dwc2_r1_trace_open(struct inode *inode, struct file *file)
+@@ -548,18 +877,33 @@ static int dwc2_r1_trace_open(struct inode *inode, struct file *file)
+ 	if (!r1)
+ 		return -ENODEV;
+ 
+-	spin_lock_irqsave(&hsotg->lock, irqflags);
+-	count = r1->count;
+-	spin_unlock_irqrestore(&hsotg->lock, irqflags);
+-
+-	len = sizeof(*hdr) + count * sizeof(struct dwc2_r1_rec);
++	/*
++	 * Allocate the maximum dump outside the lock, then take the lock once.
++	 * The two-phase version read count, dropped the lock to size the
++	 * allocation, and re-took it to fill the header and copy a prefix --
++	 * so counters could advance, or a reset could land, between the two
++	 * windows, and the header would describe a different instant from the
++	 * records.  The ring is append-only and never wraps, so records were
++	 * never corrupted; the defect was header/record skew, and it fell on
++	 * exactly the fields a negative result is argued from.
++	 *
++	 * The whole ring is 256 * 80 = 20480 bytes, so there is no reason to
++	 * size the allocation from a count read under a separate lock.
++	 */
++	len = sizeof(*hdr) + DWC2_R1_RING_SIZE * sizeof(struct dwc2_r1_rec);
+ 	snap = kvzalloc(sizeof(*snap) + len, GFP_KERNEL);
+ 	if (!snap)
+ 		return -ENOMEM;
+ 
+ 	hdr = (struct dwc2_r1_dump_hdr *)snap->data;
+ 	spin_lock_irqsave(&hsotg->lock, irqflags);
+-	count = min(count, r1->count);
++	/*
++	 * r1->count can never exceed the ring: dwc2_r1_next_record_locked()
++	 * sets lost and refuses once it is full.  The clamp is defensive, and
++	 * is written without an unbraced `if` so that no statement can later
++	 * be appended into what looks like its body.
++	 */
++	count = min_t(u32, r1->count, DWC2_R1_RING_SIZE);
+ 	dwc2_r1_fill_header(hdr, r1, count);
+ 	memcpy(snap->data + sizeof(*hdr), r1->ring,
+ 	       count * sizeof(struct dwc2_r1_rec));
+@@ -628,6 +972,13 @@ static ssize_t dwc2_r1_reset_write(struct file *file,
+ 	r1->candidate_cfg0_seen = 0;
+ 	r1->candidate_cfgn_seen = 0;
+ 	r1->candidate_intf_seen = 0;
++	r1->candidate_delayed_disable_seen = 0;
++	r1->candidate_delayed_dequeue_seen = 0;
++	r1->overlap_count = 0;
++	r1->delayed_open_count = 0;
++	r1->delayed_closed_count = 0;
++	r1->causal_sync_count = 0;
++	r1->causal_unattributed_count = 0;
+ 	r1->reset_generation++;
+ 	spin_unlock_irqrestore(&hsotg->lock, irqflags);
+ 
+@@ -668,12 +1019,19 @@ static inline void dwc2_r1_mark_hw_programmed(struct dwc2_hsotg *hsotg,
+ 					       bool continuing, u32 programmed_ctrl) { }
+ static inline void dwc2_r1_setup_enter(struct dwc2_hsotg *hsotg,
+ 				       const struct usb_ctrlrequest *ctrl) { }
+-static inline void dwc2_r1_setup_exit(struct dwc2_hsotg *hsotg) { }
++static inline void dwc2_r1_setup_exit(struct dwc2_hsotg *hsotg,
++				      int setup_ret) { }
++static inline void dwc2_r1_ep0_queue_seen(struct dwc2_hsotg *hsotg,
++					  struct dwc2_hsotg_ep *hs_ep) { }
+ static inline void dwc2_r1_stop_enter(struct dwc2_hsotg *hsotg, u8 caller) { }
+ static inline void dwc2_r1_stop_exit(struct dwc2_hsotg *hsotg) { }
+ static inline void dwc2_r1_note_disable_candidate(struct dwc2_hsotg *hsotg,
+ 						   struct dwc2_hsotg_ep *hs_ep,
+ 						   u32 ctrl) { }
++static inline void dwc2_r1_note_dequeue_candidate(struct dwc2_hsotg *hsotg,
++						  struct dwc2_hsotg_ep *hs_ep,
++						  struct dwc2_hsotg_req *hs_req)
++						  { }
+ static inline void dwc2_r1_goutnak_timeout(struct dwc2_hsotg *hsotg,
+ 					   struct dwc2_hsotg_ep *hs_ep) { }
+ static inline int dwc2_r1_init(struct dwc2_hsotg *hsotg) { return 0; }
+@@ -2052,6 +2410,7 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
+ 	first = list_empty(&hs_ep->queue);
+ 	list_add_tail(&hs_req->queue, &hs_ep->queue);
+ 	dwc2_r1_queue_lifecycle(hs, hs_ep, hs_req);
++	dwc2_r1_ep0_queue_seen(hs, hs_ep);
+ 
+ 	/*
+ 	 * Handle DDMA isochronous transfers separately - just add new entry
+@@ -2562,7 +2921,7 @@ static void dwc2_hsotg_process_control(struct dwc2_hsotg *hsotg,
+ 		spin_unlock(&hsotg->lock);
+ 		ret = hsotg->driver->setup(&hsotg->gadget, ctrl);
+ 		spin_lock(&hsotg->lock);
+-		dwc2_r1_setup_exit(hsotg);
++		dwc2_r1_setup_exit(hsotg, ret);
+ 		if (ret < 0)
+ 			dev_dbg(hsotg->dev, "driver->setup() ret %d\n", ret);
+ 	}
+@@ -4930,6 +5289,7 @@ static int dwc2_hsotg_ep_dequeue(struct usb_ep *ep, struct usb_request *req)
+ 
+ 	/* Dequeue already started request */
+ 	if (req == &hs_ep->req->req) {
++		dwc2_r1_note_dequeue_candidate(hs, hs_ep, hs_req);
+ 		dwc2_r1_stop_enter(hs, DWC2_R1_STOP_DEQUEUE);
+ 		dwc2_hsotg_ep_stop_xfr(hs, hs_ep);
+ 		dwc2_r1_stop_exit(hs);

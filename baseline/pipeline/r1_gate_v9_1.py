@@ -78,6 +78,7 @@ def load_bound(manifest_path, trace_path, mode):
     trace_sha=sha256_file(trace_path)
     if trace_sha!=m['artifacts']['dump']['sha256']:
         raise GateError('trace sha256 does not match manifest dump')
+    # Re-derive the two witnesses from their raw artifacts, not from the merged claims.
     usb=resolve_art(mp,m['artifacts']['usbmon'])
     wire,werrs=verify_wire(m,usb)
     if werrs: raise GateError('usbmon witness input: '+'; '.join(werrs))
@@ -125,6 +126,7 @@ def outcome(traces,manifests,mode,min_candidates):
         thisfp=target_fingerprint(h)
         if fp is None: fp=thisfp
         elif fp!=thisfp: return {'verdict':'INVALID_TARGET_FINGERPRINT_MISMATCH'}
+        # A timeout in preflight is not silently ignored to make a negative campaign.
         pre=classify_records(recs[:start],mode)
         if pre is not None:
             return {'verdict':'PRECAMPAIGN_TIMEOUT_PRESENT','classification':pre,

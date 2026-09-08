@@ -1,0 +1,18 @@
+pin: f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+--- 0001-dwc2-r1-observer-v6.2.patch ---
+Hunk #7 succeeded at 4852 (offset -1 lines).
+Hunk #8 succeeded at 4932 (offset -1 lines).
+Hunk #9 succeeded at 5615 (offset 20 lines).
+applied RC=0
+--- v62-llseek-fixup-v2.patch ---
+Checking patch drivers/usb/dwc2/gadget.c...
+applied RC=0
+--- 0001-dwc2-r1-observer-v6.3.1.patch ---
+Checking patch drivers/usb/dwc2/gadget.c...
+applied RC=0
+
+--- byte identity vs the built tree ---
+  gadget.c IDENTICAL
+  core.h IDENTICAL
+  debugfs.c IDENTICAL
+  Kconfig IDENTICAL
