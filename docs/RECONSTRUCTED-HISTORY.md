@@ -113,6 +113,20 @@ They are not substitutes for each other. Ambiguous zero-depth observations are r
 
 ---
 
+## Milestone H — device-harness source provenance
+
+**Gap.** The evidence design promoted the gadget-side holder witness to a load-bearing condition, and the expanded epoch names `device_harness`, but the repository layout did not reserve or preserve the corresponding `r1a_ffs_out_v2.c` source.
+
+**Discovery.** Repository-structure review noticed that `r1a-host/`, pipeline, observer and documentation all had canonical locations while the code that actually emits the holder event log did not.
+
+**Correction.** `r1a-device/` is the canonical location beside `r1a-host/`. Epoch completeness now requires the exact original tested `r1a_ffs_out_v2.c` bytes to be imported and hash-pinned before a negative campaign is accepted under the expanded epoch.
+
+**Discriminating rule.** An epoch containing `device_harness` without repository-resolvable, byte-verifiable source/binary provenance is incomplete and must not accumulate negative evidence.
+
+**Surviving claim.** Host `usbmon` and the device holder witness remain independent required witnesses; both load-bearing producers must be preserved in the epoch provenance.
+
+---
+
 ## Version-name mapping
 
 Historical labels such as `v3.1 → v3.2 → v3.3` are useful only after the corresponding original packages are imported and independently hash-verified. Until that import is complete, this chronology deliberately records **audit milestones rather than inventing exact version boundaries**.
