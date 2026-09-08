@@ -32,6 +32,21 @@ This applies equally to host and device harnesses. If `device_harness` is presen
 
 Do not synthesize missing epoch sources from documentation or memory.
 
+### Executable repository gate
+
+The prose rule above is not sufficient by itself. A checked-in baseline is not `VERIFIED` unless a clean checkout passes:
+
+```sh
+./VERIFY-REPOSITORY.sh
+```
+
+At minimum the gate must establish both:
+
+1. every path pinned by `baseline/SHA256SUMS` exists and matches its pinned SHA256; and
+2. the checked-in validator/freezer can resolve the active local `EPOCH_ARTIFACTS` contract from real files in the repository.
+
+The gate must fail closed when the validator, freezer, host source, device source, or another load-bearing source is missing. A failed gate means `baseline/` is a fragment pending canonical re-import, not a partially verified baseline.
+
 ## Evidence
 
 Because this repository is private, evidence that materially supports a surviving claim should be retained under `evidence/` or inside the frozen observer package, including ABI layouts, clean-room identity checks, build logs, negative-control outputs, and scope audits.
