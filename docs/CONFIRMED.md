@@ -1,6 +1,6 @@
 # Confirmed findings
 
-This file contains only claims that are currently accepted from pinned source or reproducible pre-runtime tooling checks.
+This file contains only claims that are currently accepted from pinned source or separately verified historical artifacts. It does **not** treat the present `baseline/` directory as reproducible evidence until the repository completeness gate passes.
 
 ## 1. Source-level teardown ordering
 
@@ -22,9 +22,9 @@ For re-arming, `USBDEVFS_RESETEP` resets host-side endpoint state (toggle/sequen
 
 These are source/tooling facts. **Real R1A execution on a DWC2 board remains pending.**
 
-## 3. Observer / evidence tooling
+## 3. Pre-runtime tooling — historical verification only
 
-The frozen baseline has reproducible pre-runtime checks for:
+Separately verified frozen artifacts from earlier clean-room runs recorded successful pre-runtime checks for:
 
 - observer ABI v9 parsing and negative ABI discrimination;
 - P4 classification tests;
@@ -35,7 +35,19 @@ The frozen baseline has reproducible pre-runtime checks for:
 - epoch/provenance binding;
 - deterministic/fail-closed packaging gates.
 
-The baseline explicitly marks:
+Those historical verification results remain valid statements about the artifacts that were actually tested. They are **not currently reproducible from this GitHub tree**, because the checked-in `baseline/` is incomplete and contains files that do not all match `baseline/SHA256SUMS`.
+
+Therefore the current repository state is:
+
+```text
+checked-in pre-runtime baseline    INCOMPLETE / RE-IMPORT REQUIRED
+historical clean-room results      RETAINED AS HISTORICAL EVIDENCE
+current-tree reproducibility       NOT ESTABLISHED
+```
+
+`./VERIFY-REPOSITORY.sh` must pass from a clean checkout before this section may again describe the repository itself as containing a verified baseline.
+
+The runtime boundary remains:
 
 ```text
 R1A runtime             NOT EXECUTED
