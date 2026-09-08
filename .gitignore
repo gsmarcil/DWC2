@@ -1,0 +1,21 @@
+# Runtime evidence / large captures
+*.pcap
+*.pcapng
+*.mon
+*.bin
+*.img
+*.Image
+*.zImage
+*.bzImage
+*.o
+*.ko
+*.log
+
+# Build products
+baseline/host/r1a_host
+__pycache__/
+*.pyc
+
+# Local work
+.work/
+.tmp/
