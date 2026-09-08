@@ -11,6 +11,14 @@
 *.ko
 *.log
 
+# Canonical baseline evidence logs are load-bearing pinned artifacts.
+# Keep this list narrow: only files already pinned by baseline/SHA256SUMS are
+# re-included. New logs remain ignored unless explicitly reviewed and pinned.
+!baseline/kernel-r3/evidence/build-v631-arm-y.log
+!baseline/kernel-r3/evidence/build-v631-arm-n.log
+!baseline/kernel-r3/evidence/v632-structural/build-v632-arm-y.log
+!baseline/kernel-r3/evidence/v632-structural/build-v632-arm-n.log
+
 # Build products
 baseline/host/r1a_host
 __pycache__/
