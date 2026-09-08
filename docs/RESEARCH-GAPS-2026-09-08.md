@@ -6,6 +6,8 @@ This document is the current execution order for closing the DWC2 research recor
 
 ### G0 — Restore the canonical evidence epoch baseline
 
+Status: **CLOSED** by the authenticated v4.2 import and repository-gate PASS.
+
 `baseline/` must be restored as one byte-identical unit from the independently hash-verified canonical archive. Do not repair the fragment by editing individual files or by regenerating `SHA256SUMS` from the fragment.
 
 Exit gate:
@@ -19,6 +21,8 @@ clean checkout
 
 ### G1 — Import the actual harness sources and bind them to the next active epoch
 
+Status: **SOURCE PLACEMENT CLOSED / EXPANDED-EPOCH BINDING OPEN**.
+
 Canonical source locations:
 
 ```text
@@ -28,7 +32,14 @@ r1a-device/r1a_ffs_out_v2.c
 
 The original tested bytes, build inputs/results, and source/binary/image hashes must be retained. The historical v4.2 epoch must not be rewritten to pretend it contained `device_harness`; that key belongs to the later expanded epoch.
 
+Both canonical source paths are present. The exact built device harness and the
+remaining external artifacts still require binding when the expanded epoch is
+created.
+
 ### G2 — State consistency
+
+Status: **CLOSED FOR THE v4.2 IMPORT**. Current documentation distinguishes the
+verified pre-runtime baseline from still-unexecuted runtime claims.
 
 Documentation must distinguish historical verification of an archived package from reproducibility of the current checkout. A fragment must never be labelled a verified executable baseline.
 

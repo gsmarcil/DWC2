@@ -16,16 +16,22 @@ For the expanded predicate/epoch definition that includes `device_harness`, this
 
 ## Current repository status
 
-The exact canonical `r1a_ffs_out_v2.c` bytes are **not yet present in this repository snapshot**. They must not be reconstructed from prose or reimplemented from memory.
-
-Before the next evidence epoch is frozen, the original source must be imported here and its SHA256 pinned by the epoch freezer/validator contract.
-
-Until that import is complete:
+The source is present as `r1a_ffs_out_v2.c`, copied byte-for-byte from the
+pre-existing uploaded source artifact. Its SHA256 is:
 
 ```text
-device_harness source in repository    NOT PRESENT
+83ea60d3566617eefc0a1b488c2916c0482781b57156d4f0d6116958f126118e
+```
+
+Before the next evidence epoch is frozen, this source and the exact built
+harness must be pinned by the epoch freezer/validator contract.
+
+Until expanded-epoch binding is complete:
+
+```text
+device_harness source in repository    PRESENT / SHA256 RECORDED
 future expanded epoch self-contained   NOT YET
-existing v4.2 baseline                 unchanged / historical pre-runtime baseline
+existing v4.2 baseline                 VERIFIED / HISTORICAL PRE-RUNTIME EPOCH UNCHANGED
 ```
 
 ## Holder witness contract

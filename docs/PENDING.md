@@ -1,18 +1,25 @@
 # Pending work
 
-## P-1 — Import the canonical device harness
+## P-1 — Bind the imported device harness to the next epoch
 
-Before the next expanded evidence epoch is frozen, import the original tested gadget-side source:
+The gadget-side source is now present at:
 
 ```text
 r1a-device/r1a_ffs_out_v2.c
 ```
 
-The source must be imported byte-for-byte from the tested package/artifact, not recreated from prose. Its SHA256 must then become part of the active epoch contract under `device_harness`.
+```text
+SHA256 83ea60d3566617eefc0a1b488c2916c0482781b57156d4f0d6116958f126118e
+```
+
+Before the next expanded evidence epoch is frozen, this source, the exact built
+harness, image, and observer patch hashes must become part of the active epoch
+contract under the appropriate artifact keys.
 
 Reason: the holder witness is load-bearing for a negative R1A campaign. An epoch that names `device_harness` without preserving the source that produced the holder log is not self-contained.
 
-This is a repository/provenance blocker, not a runtime finding.
+Source placement is closed. Expanded-epoch binding remains a provenance blocker,
+not a runtime finding.
 
 ## P0 — Real hardware qualification
 

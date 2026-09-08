@@ -2,9 +2,17 @@
 
 ## Baseline state
 
-The current GitHub `baseline/` directory is **not** a complete executable baseline. It is a fragment whose `SHA256SUMS` refers to a larger previously verified v4.2 package. Canonical re-import is required before the repository may claim reproducibility of that package.
+The GitHub `baseline/` directory is a byte-identical import of the complete v4.2
+pre-runtime package. The independently supplied archive identity is:
 
-Historical v4.2 package identity remains recorded as provenance, not as a claim about the bytes currently checked in.
+```text
+d1d754076039aedf9756883f972a4f77014c043a6b7c1e0e14b3ebaae01eb563  R1A-EVIDENCE-PIPELINE-v4.2.tar.gz
+size: 303278 bytes
+```
+
+The archive's own 89-path `SHA256SUMS`, fresh-extract `VERIFY.sh`, and the
+repository completeness gate all pass. See
+[`CANONICAL-IMPORT-RECEIPT-v4.2.md`](CANONICAL-IMPORT-RECEIPT-v4.2.md).
 
 Kernel observer lineage:
 
@@ -20,7 +28,7 @@ Repository completeness is gated by:
 ./VERIFY-REPOSITORY.sh
 ```
 
-A clean-checkout PASS is required before a checked-in baseline can be promoted to `VERIFIED`.
+A clean-checkout PASS remains required to retain the `VERIFIED` state.
 
 ## Epoch rule
 
@@ -48,9 +56,14 @@ The gadget-side FunctionFS holder source belongs under:
 r1a-device/r1a_ffs_out_v2.c
 ```
 
-In the intended expanded predicate set, `device_harness` is load-bearing because the negative R1A result depends on the holder witness. The source therefore must be imported and pinned before that epoch is frozen.
+In the intended expanded predicate set, `device_harness` is load-bearing because
+the negative R1A result depends on the holder witness. The source is now imported
+at the canonical path, but it still must be pinned with the built harness and
+other external artifacts when the expanded epoch is frozen.
 
-The historical v4.2 package predates that expanded keyset and does not itself contain the canonical device-harness source. This is tracked as pending provenance work rather than silently treated as closed.
+The historical v4.2 package predates that expanded keyset and does not itself
+contain the canonical device-harness source. The separate source import does not
+rewrite the historical v4.2 epoch.
 
 ## Historical note
 

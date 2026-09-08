@@ -2,8 +2,8 @@
 
 ```text
 SOURCE PATH / TEARDOWN ORDER       SOURCE-PROVEN
-CURRENT REPOSITORY BASELINE        INCOMPLETE / RE-IMPORT REQUIRED
-PRE-RUNTIME TOOLCHAIN              HISTORICALLY VERIFIED, NOT REPRODUCIBLE FROM CURRENT TREE
+CURRENT REPOSITORY BASELINE        VERIFIED / CANONICAL v4.2 IMPORT
+PRE-RUNTIME TOOLCHAIN              REPRODUCIBLE / VERIFIED (RUNTIME NOT EXECUTED)
 R1A REAL DWC2 RUNTIME              NOT EXECUTED
 REAL UNMAP IN TESTED ATTEMPT       NOT PROVEN
 D_issue                            UNKNOWN
@@ -12,7 +12,18 @@ SECURITY BOUNDARY IMPACT           UNKNOWN
 FINAL SEVERITY                     UNRESOLVED
 ```
 
-The checked-in `baseline/` directory is currently a fragment, not a verified executable baseline. `baseline/SHA256SUMS` pins a larger canonical package than the files presently committed, and some committed files do not match those pinned bytes. See [`docs/BASELINE-STATUS.md`](docs/BASELINE-STATUS.md) for the detailed fragment audit.
+The checked-in `baseline/` directory was restored byte-for-byte from the
+independently authenticated `R1A-EVIDENCE-PIPELINE-v4.2.tar.gz` archive:
+
+```text
+archive size     303278 bytes
+archive SHA256   d1d754076039aedf9756883f972a4f77014c043a6b7c1e0e14b3ebaae01eb563
+pinned paths     89/89 matching and tracked
+```
+
+The fragment audit and closure evidence are recorded in
+[`docs/BASELINE-STATUS.md`](docs/BASELINE-STATUS.md) and
+[`docs/CANONICAL-IMPORT-RECEIPT-v4.2.md`](docs/CANONICAL-IMPORT-RECEIPT-v4.2.md).
 
 Repository readiness is therefore fail-closed behind:
 
@@ -20,11 +31,11 @@ Repository readiness is therefore fail-closed behind:
 ./VERIFY-REPOSITORY.sh
 ```
 
-A PASS is required before the repository may again describe its checked-in pre-runtime tooling as a verified baseline.
+The canonical import passes this gate. Runtime was not executed by the import.
 
 Next actions, in order:
 
-1. re-import the canonical baseline from a hash-verified archive; do not repair it by editing or reconstructing files from prose;
-2. make `./VERIFY-REPOSITORY.sh` pass from a clean checkout;
-3. import and pin the original tested `r1a-device/r1a_ffs_out_v2.c` before freezing the expanded epoch that contains `device_harness`;
-4. only then import/reverify the expanded predicate set and proceed toward real DWC2 runtime qualification.
+1. keep `./VERIFY-REPOSITORY.sh` passing from clean checkouts;
+2. bind the imported `r1a-device/r1a_ffs_out_v2.c` source and its built harness into the next expanded epoch before accepting negative runtime evidence;
+3. import/reverify the expanded predicate set;
+4. proceed toward real DWC2 runtime qualification.
