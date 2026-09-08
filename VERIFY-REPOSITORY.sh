@@ -31,6 +31,43 @@ else
         # Keep the failure auditable without flooding normal PASS output.
         sed 's/^/  /' "$tmp" >&2
     fi
+
+    # Presence in a developer's working tree is not enough: every pinned path
+    # must actually be carried by Git.  This prevents an ignored/untracked file
+    # copied in by hand from making a dirty checkout look self-contained.
+    if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        tracked_bad=0
+        ignored_bad=0
+        while read -r digest path; do
+            [ -n "${digest:-}" ] || continue
+            [ -n "${path:-}" ] || continue
+            full="baseline/$path"
+            if ! git ls-files --error-unmatch -- "$full" >/dev/null 2>&1; then
+                printf '  untracked pinned path: %s\n' "$full" >&2
+                tracked_bad=1
+            fi
+            # --no-index evaluates ignore policy even for an already tracked
+            # file. A pinned artifact that policy would ignore after restore is
+            # an unsatisfiable repository contract unless explicitly negated.
+            if git check-ignore --no-index -q -- "$full" 2>/dev/null; then
+                printf '  ignored pinned path: %s\n' "$full" >&2
+                ignored_bad=1
+            fi
+        done < baseline/SHA256SUMS
+
+        if [ "$tracked_bad" -eq 0 ]; then
+            pass baseline_pins_tracked
+        else
+            failmsg baseline_pins_tracked
+        fi
+        if [ "$ignored_bad" -eq 0 ]; then
+            pass baseline_pins_not_ignored
+        else
+            failmsg baseline_pins_not_ignored
+        fi
+    else
+        failmsg git_tracking_check_available
+    fi
 fi
 
 # 2. EPOCH_ARTIFACTS must come from the checked-in validator, not prose.
