@@ -1,5 +1,7 @@
 # DWC2 R1 — DMA lifetime research
 
+> **Private / embargoed workspace.** This repository is the canonical working record for the DWC2 research campaign. It is intentionally private until the research, coordinated disclosure, and any required publication approval are complete. See [`SECURITY.md`](SECURITY.md).
+
 Research repository for the Linux DWC2 gadget request-unmap lifetime hypothesis and the separate DWC2 PIO RX boundary track.
 
 ## Frozen scope
@@ -52,6 +54,10 @@ Each transition requires its own artifact. A later claim is never inferred from 
 - [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) — attacker/precondition boundaries.
 - [`docs/PROVENANCE.md`](docs/PROVENANCE.md) — frozen artifacts and epoch rules.
 - [`baseline/`](baseline/) — verified pre-runtime tooling and kernel observer package.
+
+## Working rule
+
+From this point onward, GitHub `main` is the canonical research record. New experiments, tooling changes, and evidence should be committed here with explicit epoch/provenance impact. Local copies are working copies only until their hashes/changes are recorded in this repository.
 
 ## Reporting discipline
 
