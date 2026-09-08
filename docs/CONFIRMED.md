@@ -35,7 +35,7 @@ Separately verified frozen artifacts from earlier clean-room runs recorded succe
 - epoch/provenance binding;
 - deterministic/fail-closed packaging gates.
 
-Those historical verification results remain valid statements about the artifacts that were actually tested. They are **not currently reproducible from this GitHub tree**, because the checked-in `baseline/` is incomplete and contains files that do not all match `baseline/SHA256SUMS`.
+Those historical verification results remain valid statements about the artifacts that were actually tested. They are **not currently reproducible from this GitHub tree**, because the checked-in `baseline/` is incomplete and contains files that do not all match `baseline/SHA256SUMS`. The current fragment is documented in [`BASELINE-STATUS.md`](BASELINE-STATUS.md).
 
 Therefore the current repository state is:
 
