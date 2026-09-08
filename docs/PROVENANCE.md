@@ -1,16 +1,26 @@
 # Provenance and epoch discipline
 
-## Frozen baseline
+## Baseline state
 
-The current repository baseline is the pre-runtime v4.2 provenance/freeze package.
+The current GitHub `baseline/` directory is **not** a complete executable baseline. It is a fragment whose `SHA256SUMS` refers to a larger previously verified v4.2 package. Canonical re-import is required before the repository may claim reproducibility of that package.
 
-Kernel observer baseline:
+Historical v4.2 package identity remains recorded as provenance, not as a claim about the bytes currently checked in.
+
+Kernel observer lineage:
 
 ```text
 pin: f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
 observer: r3
 ABI: v9 / header 112 / record 80
 ```
+
+Repository completeness is gated by:
+
+```sh
+./VERIFY-REPOSITORY.sh
+```
+
+A clean-checkout PASS is required before a checked-in baseline can be promoted to `VERIFIED`.
 
 ## Epoch rule
 
@@ -28,6 +38,8 @@ Manual retyping of hash values is outside the frozen path.
 
 An epoch artifact must also be repository-resolvable. A key such as `device_harness` is insufficient by itself: the exact tested source/binary provenance that produced the holder witness must be present and byte-verifiable from the canonical repository.
 
+The repository completeness gate first verifies the imported baseline bytes against `baseline/SHA256SUMS`, then requires the validator/freezer local epoch contract to resolve from checked-in files. Missing canonical sources are a hard failure, not an invitation to reconstruct them from documentation.
+
 ## Device harness boundary
 
 The gadget-side FunctionFS holder source belongs under:
@@ -38,7 +50,7 @@ r1a-device/r1a_ffs_out_v2.c
 
 In the intended expanded predicate set, `device_harness` is load-bearing because the negative R1A result depends on the holder witness. The source therefore must be imported and pinned before that epoch is frozen.
 
-The current v4.2 baseline preserved in this repository predates that expanded keyset and does not itself contain the canonical device-harness source. This mismatch is explicitly tracked as pending provenance work rather than silently treated as closed.
+The historical v4.2 package predates that expanded keyset and does not itself contain the canonical device-harness source. This is tracked as pending provenance work rather than silently treated as closed.
 
 ## Historical note
 
