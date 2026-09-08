@@ -1,15 +1,21 @@
-# Current baseline import blockers
+# Baseline import blockers — SUPERSEDED / CLOSED
 
-This file records blockers that must be removed by canonical import, not by editing the fragment in place.
+The former assembly blockers were closed by importing the authenticated v4.2
+archive as one byte-identical unit.
 
-Current blockers include:
+```text
+missing/mismatching baseline paths    CLOSED — 89/89 match
+validator/freezer resolution           CLOSED — PASS
+pinned log ignore conflict             CLOSED — no pinned path ignored
+canonical host source location         CLOSED — present
+legacy device source location          CLOSED — preserved
+baseline integrity sub-gate            CLOSED — PASS
+```
 
-- `baseline/SHA256SUMS` references files that are absent from the repository;
-- some files currently present under `baseline/` do not match the pinned hashes;
-- `baseline/pipeline/r1a_manifest.py` is absent, so `EPOCH_ARTIFACTS` cannot currently be read from the canonical validator;
-- the local epoch resolver therefore cannot close from the checked-in tree;
-- `r1a-host/r1a_host.c` is not yet imported into its canonical repository location;
-- `r1a-device/r1a_ffs_out_v2.c` is not yet imported into its canonical repository location;
-- historical evidence logs pinned by the old manifest conflict with the current broad `*.log` ignore rule and must be handled explicitly during canonical import rather than silently omitted.
+Closure evidence is retained in
+[`CANONICAL-IMPORT-RECEIPT-v4.2.md`](CANONICAL-IMPORT-RECEIPT-v4.2.md).
 
-The remedy is the procedure in `docs/BASELINE-REIMPORT.md`.
+The compatible holder-event producer remains missing. This is a campaign
+readiness blocker, not a baseline-import blocker: the overall repository gate
+fails closed while the authenticated v4.2 baseline remains verified. It does
+not rewrite historical v4.2.

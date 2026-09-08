@@ -1,0 +1,50 @@
+R1A-EVIDENCE-PIPELINE v4.2 — provenance/freeze audit
+
+archive
+  sha256  d1d754076039aedf9756883f972a4f77014c043a6b7c1e0e14b3ebaae01eb563
+  size    303278 bytes
+  deterministic repack: BYTE_IDENTICAL_PASS
+  hidden .git: absent
+  built r1a_host binary: absent
+  nested component SHA256SUMS pinned by top-level SHA256SUMS: yes
+
+new v4.2 closure
+  validator EPOCH_ARTIFACTS is the artifact-key authority
+  gate runtime_epoch_local_files() uses imported module.__file__ paths
+  freeze_epoch.py consumes those exact runtime paths
+  sibling gate import not epoch-pinned -> reject
+  module resolved outside package -> reject
+  missing external image/observer_patch/harness -> reject
+  unsafe epoch id -> reject
+  host consumes freeze output directly with --epoch-json
+  --epoch-json mixed with manual --epoch-id/--sha-* -> reject
+  running /proc/self/exe hash must equal epoch.artifacts.harness
+  duplicate epoch_id in input JSON -> reject
+  documentation contract derived from Python AST + host C option presence
+  top-level packaging excludes .git and build/cache products
+
+tests from fresh extract
+  top-level integrity                             PASS
+  duplicate identity                             PASS
+  code-derived contract                          PASS
+  contract mutation selftest                     5/5 PASS
+  host -Werror + selftests                       PASS
+  epoch -> host integration                      6/6 PASS
+  manifest                                       67/67 PASS
+  gate binding                                    7/7 PASS
+  verdict                                        19/19 PASS
+  witness                                         4/4 PASS
+  pipeline                                        5/5 PASS
+  freeze_epoch                                    8/8 PASS
+  frozen v9 hash                                 358b3abd8c76f478cab7f8487906715091ab2372de7db0f0a178829597a2b1db
+  kernel local VERIFY                            PASS (real-tree gate skipped without tree)
+  second-pass equivalent suites                  PASS
+
+runtime
+  R1A                                             NOT EXECUTED
+  R2 / D_issue                                    UNKNOWN
+  R3 / D_commit                                   UNKNOWN
+  security impact                                 UNKNOWN
+
+This revision changes provenance/freeze plumbing and the v9.1 wrapper/host hash,
+so it is a new evidence epoch. Negative counts from prior epochs do not carry.

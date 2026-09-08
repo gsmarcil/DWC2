@@ -24,6 +24,7 @@ def sha256(path):
     return h.hexdigest()
 
 def setup_from_tail(tail):
+    # usbmon control submit: "s 00 09 0000 0000 0000 ..."
     t=tail.split()
     for i,x in enumerate(t):
         if x.lower()=='s' and i+5 < len(t):
@@ -49,7 +50,7 @@ def verify(m, cap_path):
         errs.append('cfgn campaign trigger is indistinguishable from raw restore in usbmon; use a destructive single-attempt epoch or a distinguishable trigger')
 
     attempts=[a for a in (m.get('attempts') or []) if a.get('trigger_attempted')]
-    active={}
+    active={}  # urb tag -> (bus,dev,ep)
     rows=[]; matched=0; matching_controls=0; bulk_seen=0
     lines=Path(cap_path).read_text(errors='replace').splitlines()
     for lnno,line in enumerate(lines,1):
@@ -71,7 +72,9 @@ def verify(m, cap_path):
             continue
         a=attempts[matched]
         eb=a.get('usb_bus'); ed=a.get('usb_device'); eep=a.get('bulk_ep')
+        # The control must be on the same device that the attempt recorded.
         if (bus,dev)!=(eb,ed):
+            # Do not consume a foreign matching control; it is extra traffic.
             continue
         n=sum(1 for b,d,e in active.values() if (b,d,e)==(bus,dev,eep & 0x0f))
         internal=((a.get('outstanding') or {}).get('inflight_at_trigger'))
@@ -83,6 +86,7 @@ def verify(m, cap_path):
                      'internal_inflight_at_trigger':internal,
                      'agree':agree,'qualifies':qualifies})
         matched += 1
+    # Missing campaign control rows are material failures, not zero-inflight observations.
     by_n={r['n']:r for r in rows}
     for a in attempts:
         if a.get('n') not in by_n:

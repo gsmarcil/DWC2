@@ -2,9 +2,17 @@
 
 ## Baseline state
 
-The current GitHub `baseline/` directory is **not** a complete executable baseline. It is a fragment whose `SHA256SUMS` refers to a larger previously verified v4.2 package. Canonical re-import is required before the repository may claim reproducibility of that package.
+The GitHub `baseline/` directory is a byte-identical import of the complete v4.2
+pre-runtime package. The independently supplied archive identity is:
 
-Historical v4.2 package identity remains recorded as provenance, not as a claim about the bytes currently checked in.
+```text
+d1d754076039aedf9756883f972a4f77014c043a6b7c1e0e14b3ebaae01eb563  R1A-EVIDENCE-PIPELINE-v4.2.tar.gz
+size: 303278 bytes
+```
+
+The archive's own 89-path `SHA256SUMS`, fresh-extract `VERIFY.sh`, and the
+baseline-integrity sub-gate all pass. See
+[`CANONICAL-IMPORT-RECEIPT-v4.2.md`](CANONICAL-IMPORT-RECEIPT-v4.2.md).
 
 Kernel observer lineage:
 
@@ -20,7 +28,9 @@ Repository completeness is gated by:
 ./VERIFY-REPOSITORY.sh
 ```
 
-A clean-checkout PASS is required before a checked-in baseline can be promoted to `VERIFIED`.
+`REPOSITORY_BASELINE: PASS` remains required to retain the baseline's
+`VERIFIED` state. The overall process currently exits nonzero at the independent
+holder-producer capability gate.
 
 ## Epoch rule
 
@@ -36,9 +46,16 @@ The epoch keyset is defined by the active validator. The freezer hashes the exac
 
 Manual retyping of hash values is outside the frozen path.
 
-An epoch artifact must also be repository-resolvable. A key such as `device_harness` is insufficient by itself: the exact tested source/binary provenance that produced the holder witness must be present and byte-verifiable from the canonical repository.
+An epoch artifact must also be repository-resolvable. A key such as
+`device_harness` is insufficient by itself: the exact tested source/binary
+provenance that produced the holder witness must be present, byte-verifiable,
+and contract-compatible with the active `holder_merger`.
 
-The repository completeness gate first verifies the imported baseline bytes against `baseline/SHA256SUMS`, then requires the validator/freezer local epoch contract to resolve from checked-in files. Missing canonical sources are a hard failure, not an invitation to reconstruct them from documentation.
+The repository gate first verifies the imported baseline bytes against
+`baseline/SHA256SUMS`, then resolves the validator/freezer contract, and finally
+checks that an active `holder_merger` has a structurally compatible producer.
+Missing or incompatible canonical sources are a hard failure, not an invitation
+to reconstruct them from documentation.
 
 ## Device harness boundary
 
@@ -48,9 +65,14 @@ The gadget-side FunctionFS holder source belongs under:
 r1a-device/r1a_ffs_out_v2.c
 ```
 
-In the intended expanded predicate set, `device_harness` is load-bearing because the negative R1A result depends on the holder witness. The source therefore must be imported and pinned before that epoch is frozen.
+In the intended expanded predicate set, `device_harness` is load-bearing because
+the negative R1A result depends on the holder witness. The file now at the
+canonical path is a preserved legacy revision, not the compatible producer: it
+emits only `--artifact` summary output and cannot feed `holder_merge.py`.
 
-The historical v4.2 package predates that expanded keyset and does not itself contain the canonical device-harness source. This is tracked as pending provenance work rather than silently treated as closed.
+The historical v4.2 package predates that expanded keyset and does not itself
+contain the canonical device-harness source. Preserving an earlier device source
+does not rewrite the historical v4.2 epoch and does not close producer import.
 
 ## Historical note
 

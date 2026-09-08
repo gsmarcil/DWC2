@@ -1,0 +1,153 @@
+diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
+index f30cec1f7..8d621ef14 100644
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -118,7 +118,7 @@ enum dwc2_r1_stop_caller {
+ 
+ #define DWC2_R1_RING_SIZE	256
+ #define DWC2_R1_DUMP_MAGIC	0x424f3152U
+-#define DWC2_R1_DUMP_VERSION	8U
++#define DWC2_R1_DUMP_VERSION	9U
+ 
+ #define DWC2_R1_F_REQ_PRESENT		BIT(0)
+ #define DWC2_R1_F_HW_PROGRAMMED	BIT(1)
+@@ -522,12 +522,12 @@ static void dwc2_r1_ep0_queue_seen(struct dwc2_hsotg *hsotg,
+  * different CPU while a synchronous window is open is concurrent with the
+  * callback, not caused by it, and is recorded as OVERLAP.
+  */
+-static void dwc2_r1_stop_enter(struct dwc2_hsotg *hsotg, u8 caller)
++static u8 dwc2_r1_stop_enter(struct dwc2_hsotg *hsotg, u8 caller)
+ {
+ 	struct dwc2_r1_state *r1 = hsotg->r1;
+ 
+ 	if (!r1)
+-		return;
++		return DWC2_R1_CAUSE_NONE;
+ 	r1->stop_caller = caller;
+ 
+ 	if (r1->setup_phase == 1) {
+@@ -544,6 +544,8 @@ static void dwc2_r1_stop_enter(struct dwc2_hsotg *hsotg, u8 caller)
+ 		r1->stop_causal = DWC2_R1_CAUSE_NONE;
+ 		r1->causal_unattributed_count++;
+ 	}
++
++	return r1->stop_causal;
+ }
+ 
+ static void dwc2_r1_stop_exit(struct dwc2_hsotg *hsotg)
+@@ -554,10 +556,24 @@ static void dwc2_r1_stop_exit(struct dwc2_hsotg *hsotg)
+ 	}
+ }
+ 
+-/* Uses only the stock ep_disable() DOEPCTL read; no new pre-wait MMIO. */
++/*
++ * Uses only the stock ep_disable() DOEPCTL read; no new pre-wait MMIO.
++ *
++ * `cause` is passed in rather than read from r1->stop_causal.  Reading the
++ * shared field is what broke this denominator in v6.3 and v6.3.1: the call sat
++ * before dwc2_r1_stop_enter(), which is the only writer, and every previous
++ * episode had ended with dwc2_r1_stop_exit() setting the field back to
++ * DWC2_R1_CAUSE_NONE.  The value read was therefore NONE on every call, not
++ * merely stale, so the OVERLAP guard and the delayed branch below were both
++ * unreachable: overlapped stops were credited to cfg0/cfgn/interface, and
++ * candidate_delayed_disable_seen never left zero.
++ *
++ * Taking it as an argument removes the ordering dependency instead of
++ * correcting it -- there is no value to pass until stop_enter() has run.
++ */
+ static void dwc2_r1_note_disable_candidate(struct dwc2_hsotg *hsotg,
+ 					   struct dwc2_hsotg_ep *hs_ep,
+-					   u32 ctrl)
++					   u32 ctrl, u8 cause)
+ {
+ 	struct dwc2_r1_state *r1 = hsotg->r1;
+ 	struct dwc2_hsotg_req *hs_req;
+@@ -574,14 +590,18 @@ static void dwc2_r1_note_disable_candidate(struct dwc2_hsotg *hsotg,
+ 		return;
+ 
+ 	/* An unattributable stop must not be credited to any trigger. */
+-	if (r1->stop_causal == DWC2_R1_CAUSE_OVERLAP)
++	if (cause == DWC2_R1_CAUSE_OVERLAP)
+ 		return;
+ 
+-	if (r1->stop_causal == DWC2_R1_CAUSE_DELAYED) {
++	if (cause == DWC2_R1_CAUSE_DELAYED) {
+ 		r1->candidate_delayed_disable_seen++;
+ 		return;
+ 	}
+ 
++	/* Only a stop owned by the setup that is still open counts as its own. */
++	if (cause != DWC2_R1_CAUSE_SYNC_OWNER)
++		return;
++
+ 	switch (r1->trigger) {
+ 	case DWC2_R1_TRIG_SET_CONFIG_ZERO:
+ 		r1->candidate_cfg0_seen++;
+@@ -683,13 +703,18 @@ static u8 dwc2_r1_classify_mapping(struct dwc2_hsotg_req *hs_req, u16 *f2)
+  */
+ static void dwc2_r1_note_dequeue_candidate(struct dwc2_hsotg *hsotg,
+ 					   struct dwc2_hsotg_ep *hs_ep,
+-					   struct dwc2_hsotg_req *hs_req)
++					   struct dwc2_hsotg_req *hs_req,
++					   u8 cause)
+ {
+ 	struct dwc2_r1_state *r1 = hsotg->r1;
+ 	const struct usb_endpoint_descriptor *desc;
+ 
++	/*
++	 * Gate on the class stop_enter() computed rather than on setup_phase.
++	 * They agree today, but one source of truth cannot drift from itself.
++	 */
+ 	if (!r1 || r1->trigger == DWC2_R1_TRIG_NONE ||
+-	    r1->setup_phase != 2 ||
++	    cause != DWC2_R1_CAUSE_DELAYED ||
+ 	    !dwc2_r1_trackable_out_ep(hs_ep) ||
+ 	    !using_dma(hsotg) || using_desc_dma(hsotg))
+ 		return;
+@@ -1023,15 +1048,18 @@ static inline void dwc2_r1_setup_exit(struct dwc2_hsotg *hsotg,
+ 				      int setup_ret) { }
+ static inline void dwc2_r1_ep0_queue_seen(struct dwc2_hsotg *hsotg,
+ 					  struct dwc2_hsotg_ep *hs_ep) { }
+-static inline void dwc2_r1_stop_enter(struct dwc2_hsotg *hsotg, u8 caller) { }
++static inline u8 dwc2_r1_stop_enter(struct dwc2_hsotg *hsotg, u8 caller)
++{
++	return 0;
++}
+ static inline void dwc2_r1_stop_exit(struct dwc2_hsotg *hsotg) { }
+ static inline void dwc2_r1_note_disable_candidate(struct dwc2_hsotg *hsotg,
+ 						   struct dwc2_hsotg_ep *hs_ep,
+-						   u32 ctrl) { }
++						   u32 ctrl, u8 cause) { }
+ static inline void dwc2_r1_note_dequeue_candidate(struct dwc2_hsotg *hsotg,
+ 						  struct dwc2_hsotg_ep *hs_ep,
+-						  struct dwc2_hsotg_req *hs_req)
+-						  { }
++						  struct dwc2_hsotg_req *hs_req,
++						  u8 cause) { }
+ static inline void dwc2_r1_goutnak_timeout(struct dwc2_hsotg *hsotg,
+ 					   struct dwc2_hsotg_ep *hs_ep) { }
+ static inline int dwc2_r1_init(struct dwc2_hsotg *hsotg) { return 0; }
+@@ -5210,8 +5238,9 @@ static int dwc2_hsotg_ep_disable(struct usb_ep *ep)
+ 	ctrl = dwc2_readl(hsotg, epctrl_reg);
+ 
+ 	if (ctrl & DXEPCTL_EPENA) {
+-		dwc2_r1_note_disable_candidate(hsotg, hs_ep, ctrl);
+-		dwc2_r1_stop_enter(hsotg, DWC2_R1_STOP_DISABLE);
++		u8 cause = dwc2_r1_stop_enter(hsotg, DWC2_R1_STOP_DISABLE);
++
++		dwc2_r1_note_disable_candidate(hsotg, hs_ep, ctrl, cause);
+ 		dwc2_hsotg_ep_stop_xfr(hsotg, hs_ep);
+ 		dwc2_r1_stop_exit(hsotg);
+ 	}
+@@ -5289,8 +5318,9 @@ static int dwc2_hsotg_ep_dequeue(struct usb_ep *ep, struct usb_request *req)
+ 
+ 	/* Dequeue already started request */
+ 	if (req == &hs_ep->req->req) {
+-		dwc2_r1_note_dequeue_candidate(hs, hs_ep, hs_req);
+-		dwc2_r1_stop_enter(hs, DWC2_R1_STOP_DEQUEUE);
++		u8 cause = dwc2_r1_stop_enter(hs, DWC2_R1_STOP_DEQUEUE);
++
++		dwc2_r1_note_dequeue_candidate(hs, hs_ep, hs_req, cause);
+ 		dwc2_hsotg_ep_stop_xfr(hs, hs_ep);
+ 		dwc2_r1_stop_exit(hs);
+ 	}

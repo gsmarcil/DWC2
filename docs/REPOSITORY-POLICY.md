@@ -28,7 +28,11 @@ For an epoch to be self-contained, every such artifact must have one of the foll
 1. the exact source/binary that is hashed at runtime; or
 2. a reproducible, byte-verifiable derivation anchored by canonical source plus the build inputs required by the frozen contract.
 
-This applies equally to host and device harnesses. If `device_harness` is present in the active epoch contract, the exact tested `r1a_ffs_out_v2.c` source belongs under `r1a-device/` and must be pinned before negative evidence can be accumulated under that epoch.
+This applies equally to host and device harnesses. If `holder_merger` is active,
+the repository must carry a device producer that can emit every field and
+sentinel consumed by that merger. If `device_harness` is added to the epoch, the
+exact tested source and binary must also be pinned before negative evidence can
+be accumulated. Path presence alone is never capability proof.
 
 Do not synthesize missing epoch sources from documentation or memory.
 
@@ -40,12 +44,18 @@ The prose rule above is not sufficient by itself. A checked-in baseline is not `
 ./VERIFY-REPOSITORY.sh
 ```
 
-At minimum the gate must establish both:
+At minimum the gate must establish:
 
 1. every path pinned by `baseline/SHA256SUMS` exists and matches its pinned SHA256; and
-2. the checked-in validator/freezer can resolve the active local `EPOCH_ARTIFACTS` contract from real files in the repository.
+2. the checked-in validator/freezer can resolve the active local
+   `EPOCH_ARTIFACTS` contract from real files in the repository; and
+3. an active holder merger has a producer exposing its event-log schema.
 
-The gate must fail closed when the validator, freezer, host source, device source, or another load-bearing source is missing. A failed gate means `baseline/` is a fragment pending canonical re-import, not a partially verified baseline.
+The gate must fail closed when the validator, freezer, host source, device source,
+or another load-bearing source is missing or incompatible. Its output separates
+baseline integrity from campaign readiness: a baseline failure requires
+canonical re-import, while a producer-capability failure leaves the authenticated
+baseline intact and blocks the campaign.
 
 ## Evidence
 

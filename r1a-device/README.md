@@ -1,31 +1,43 @@
-# R1A device harness
+# R1A device source — legacy/incompatible producer
 
 This directory is the canonical repository location for the gadget-side R1A harness.
 
 ## Required source
 
-The load-bearing device-side source is:
+The preserved device-side source is:
 
 ```text
 r1a_ffs_out_v2.c
 ```
 
-It is responsible for the FunctionFS Bulk-OUT holder witness used to establish that a gadget-side request remains queued during the host-triggered teardown attempt.
+It implements the FunctionFS Bulk-OUT workload and writes a one-shot summary via
+`--artifact`. It does **not** implement the event-log witness consumed by the
+active `baseline/pipeline/holder_merge.py`.
 
-For the expanded predicate/epoch definition that includes `device_harness`, this source is an **epoch artifact**. A negative campaign therefore depends on the exact source bytes that produced the device-side holder log.
+For an expanded predicate/epoch definition that includes `device_harness`, the
+actual compatible producer becomes an epoch artifact. This legacy source cannot
+fill that role merely because it occupies the canonical path.
 
 ## Current repository status
 
-The exact canonical `r1a_ffs_out_v2.c` bytes are **not yet present in this repository snapshot**. They must not be reconstructed from prose or reimplemented from memory.
-
-Before the next evidence epoch is frozen, the original source must be imported here and its SHA256 pinned by the epoch freezer/validator contract.
-
-Until that import is complete:
+The source is present as `r1a_ffs_out_v2.c`, copied byte-for-byte from the
+pre-existing uploaded source artifact. Its SHA256 is:
 
 ```text
-device_harness source in repository    NOT PRESENT
+83ea60d3566617eefc0a1b488c2916c0482781b57156d4f0d6116958f126118e
+```
+
+The hash records identity, not capability. Before the next evidence epoch is
+frozen, the original producer matching the merger contract and its exact built
+harness must be imported and pinned.
+
+Until expanded-epoch binding is complete:
+
+```text
+legacy device source in repository     PRESENT / SHA256 RECORDED
+compatible holder producer             MISSING
 future expanded epoch self-contained   NOT YET
-existing v4.2 baseline                 unchanged / historical pre-runtime baseline
+existing v4.2 baseline                 VERIFIED / HISTORICAL PRE-RUNTIME EPOCH UNCHANGED
 ```
 
 ## Holder witness contract
@@ -33,12 +45,19 @@ existing v4.2 baseline                 unchanged / historical pre-runtime baseli
 The device harness is distinct from the host `usbmon` witness:
 
 - `usbmon` establishes the host-side outstanding-URB condition;
-- the device harness establishes the gadget-side queued-request/holder condition.
+- a compatible device producer would establish the gadget-side
+  queued-request/holder condition.
 
 Neither witness substitutes for the other.
 
-The imported source must remain tied to the event-log format consumed by `holder_merge.py`, including the session/boot binding required by the active manifest contract.
+The current source has no `--event-log` and emits none of
+`event:R1A_HOLDER`, `phase:campaign`, `pending_reads`, `session_id`, `boot_id`,
+or `device_seq`. `verify_holder_contract.py` therefore rejects it while
+`holder_merger` is active.
 
 ## Rule
 
-Do not create a placeholder implementation and call it canonical. Import the original tested source, verify it byte-for-byte, then make the resulting hash part of the new epoch.
+Do not create a placeholder implementation or adapt the incompatible v3.3
+format and call it canonical. Import the original matching source, verify it
+byte-for-byte, prove its event output round-trips through `holder_merge.py`, then
+make the source/binary identities part of the new epoch.

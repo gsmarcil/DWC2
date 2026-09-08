@@ -6,6 +6,8 @@ This document is the current execution order for closing the DWC2 research recor
 
 ### G0 — Restore the canonical evidence epoch baseline
 
+Status: **CLOSED** by the authenticated v4.2 import and baseline-sub-gate PASS.
+
 `baseline/` must be restored as one byte-identical unit from the independently hash-verified canonical archive. Do not repair the fragment by editing individual files or by regenerating `SHA256SUMS` from the fragment.
 
 Exit gate:
@@ -14,10 +16,12 @@ Exit gate:
 clean checkout
 + every path in baseline/SHA256SUMS present, tracked, not ignored, byte-identical
 + executable EPOCH_ARTIFACTS contract resolves
-+ ./VERIFY-REPOSITORY.sh PASS
++ `REPOSITORY_BASELINE: PASS` from `./VERIFY-REPOSITORY.sh`
 ```
 
 ### G1 — Import the actual harness sources and bind them to the next active epoch
+
+Status: **OPEN — COMPATIBLE DEVICE PRODUCER MISSING**.
 
 Canonical source locations:
 
@@ -28,7 +32,16 @@ r1a-device/r1a_ffs_out_v2.c
 
 The original tested bytes, build inputs/results, and source/binary/image hashes must be retained. The historical v4.2 epoch must not be rewritten to pretend it contained `device_harness`; that key belongs to the later expanded epoch.
 
+The host source is canonical. The device path contains an earlier revision that
+cannot emit the JSONL schema consumed by the active `holder_merger`. Obtain the
+original matching producer, round-trip its output through the merger, then bind
+its exact source/binary and the remaining external artifacts.
+
 ### G2 — State consistency
+
+Status: **CLOSED FOR THE v4.2 BASELINE / G1 BLOCK EXPLICIT**. Current
+documentation distinguishes the verified pre-runtime baseline, incompatible
+device producer, and still-unexecuted runtime claims.
 
 Documentation must distinguish historical verification of an archived package from reproducibility of the current checkout. A fragment must never be labelled a verified executable baseline.
 

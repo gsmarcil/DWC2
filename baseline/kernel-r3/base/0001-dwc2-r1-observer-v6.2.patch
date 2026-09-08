@@ -1,0 +1,722 @@
+diff --git a/drivers/usb/dwc2/Kconfig b/drivers/usb/dwc2/Kconfig
+--- a/drivers/usb/dwc2/Kconfig
++++ b/drivers/usb/dwc2/Kconfig
+@@ -62,5 +62,17 @@
+ 	  The Designware USB2.0 PCI interface module for controllers
+ 	  connected to a PCI bus.
+ 
++config DWC2_REQ_UNMAP_R1_OBSERVER
++	bool "DWC2 R1 stop-timeout observer (TEST ONLY)"
++	depends on DEBUG_FS
++	depends on USB_DWC2_PERIPHERAL || USB_DWC2_DUAL_ROLE
++	help
++	  Enable observer-only instrumentation for DWC2 host-driven
++	  endpoint-teardown experiments. The observer tracks standard
++	  SET_CONFIGURATION and SET_INTERFACE triggers, records only
++	  natural GOUTNAKEFF timeouts, and captures immediate post-timeout
++	  endpoint/core state in a bounded in-memory ring.
++	  Say N unless running the R1 validation experiment.
++
+ config USB_DWC2_DEBUG
+ 	bool "Enable Debugging Messages"
+diff --git a/drivers/usb/dwc2/core.h b/drivers/usb/dwc2/core.h
+--- a/drivers/usb/dwc2/core.h
++++ b/drivers/usb/dwc2/core.h
+@@ -69,5 +69,9 @@
+ struct dwc2_hsotg;
+ struct dwc2_hsotg_req;
++#if IS_ENABLED(CONFIG_DWC2_REQ_UNMAP_R1_OBSERVER)
++struct dwc2_r1_state;
++void dwc2_r1_debugfs_init(struct dwc2_hsotg *hsotg);
++#endif
+ 
+ /**
+  * struct dwc2_hsotg_ep - driver endpoint definition.
+@@ -173,6 +177,10 @@
+ 	struct usb_request      req;
+ 	struct list_head        queue;
+ 	void *saved_req_buf;
++#if IS_ENABLED(CONFIG_DWC2_REQ_UNMAP_R1_OBSERVER)
++	u32 trace_seq;
++	bool trace_hw_programmed;
++#endif
+ };
+ 
+ #if IS_ENABLED(CONFIG_USB_DWC2_PERIPHERAL) || \
+@@ -1232,5 +1240,8 @@
+ 	unsigned int remote_wakeup_allowed:1;
+ 	struct dwc2_hsotg_ep *eps_in[MAX_EPS_CHANNELS];
+ 	struct dwc2_hsotg_ep *eps_out[MAX_EPS_CHANNELS];
++#if IS_ENABLED(CONFIG_DWC2_REQ_UNMAP_R1_OBSERVER)
++	struct dwc2_r1_state *r1;
++#endif
+ #endif /* CONFIG_USB_DWC2_PERIPHERAL || CONFIG_USB_DWC2_DUAL_ROLE */
+ };
+diff --git a/drivers/usb/dwc2/debugfs.c b/drivers/usb/dwc2/debugfs.c
+--- a/drivers/usb/dwc2/debugfs.c
++++ b/drivers/usb/dwc2/debugfs.c
+@@ -300,5 +300,8 @@
+ 	debugfs_create_file("state", 0444, root, hsotg, &state_fops);
+ 	debugfs_create_file("testmode", 0644, root, hsotg, &testmode_fops);
+ 	debugfs_create_file("fifo", 0444, root, hsotg, &fifo_fops);
++#if IS_ENABLED(CONFIG_DWC2_REQ_UNMAP_R1_OBSERVER)
++	dwc2_r1_debugfs_init(hsotg);
++#endif
+ 
+ 	/* Create one file for each out endpoint */
+diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -14,4 +14,7 @@
+ #include <linux/module.h>
+ #include <linux/spinlock.h>
+ #include <linux/interrupt.h>
++#include <linux/debugfs.h>
++#include <linux/fs.h>
++#include <linux/uaccess.h>
+ #include <linux/platform_device.h>
+@@ -92,6 +95,579 @@
+ {
+ 	return hsotg->params.g_dma_desc;
+ }
++
++enum dwc2_r1_stop_caller {
++	DWC2_R1_STOP_NONE = 0,
++	DWC2_R1_STOP_DISABLE,
++	DWC2_R1_STOP_DEQUEUE,
++};
++
++#if IS_ENABLED(CONFIG_DWC2_REQ_UNMAP_R1_OBSERVER)
++
++#define DWC2_R1_RING_SIZE	256
++#define DWC2_R1_DUMP_MAGIC	0x424f3152U
++#define DWC2_R1_DUMP_VERSION	6U
++
++#define DWC2_R1_F_REQ_PRESENT		BIT(0)
++#define DWC2_R1_F_HW_PROGRAMMED	BIT(1)
++#define DWC2_R1_F_EPENA			BIT(2)
++#define DWC2_R1_F_NO_XFERCOMPL		BIT(3)
++#define DWC2_R1_F_EINPROGRESS		BIT(4)
++#define DWC2_R1_F_CALL_DISABLE		BIT(5)
++#define DWC2_R1_F_CALL_DEQUEUE		BIT(6)
++#define DWC2_R1_F_NONZERO_LENGTH	BIT(7)
++#define DWC2_R1_F_DMA_EN		BIT(8)
++#define DWC2_R1_F_BULK_OUT		BIT(9)
++#define DWC2_R1_F_GOUTNAK_STS		BIT(10)
++#define DWC2_R1_F_EP_NAK_STS		BIT(11)
++#define DWC2_R1_F_RXFLVL		BIT(12)
++#define DWC2_R1_F_AHB_IDLE		BIT(13)
++#define DWC2_R1_F_DMAREQ		BIT(14)
++#define DWC2_R1_F_GOUTNAKEFF_NOW	BIT(15)
++
++#define DWC2_R1_CAP_G_DMA		BIT(0)
++#define DWC2_R1_CAP_G_DMA_DESC		BIT(1)
++
++#define DWC2_R1_EV_GOUTNAKEFF_TIMEOUT	1
++
++enum dwc2_r1_trigger {
++	DWC2_R1_TRIG_NONE = 0,
++	DWC2_R1_TRIG_SET_CONFIG_ZERO,
++	DWC2_R1_TRIG_SET_CONFIG_NONZERO,
++	DWC2_R1_TRIG_SET_INTERFACE,
++};
++
++struct dwc2_r1_rec {
++	__le32 seq;
++	__le16 tag;
++	__le16 flags;
++	__le16 w_value;
++	__le16 w_index;
++	__le16 w_length;
++	u8 bm_request_type;
++	u8 b_request;
++	u8 trigger;
++	u8 ep_index;
++	__le16 reserved;
++	__le32 gintsts;
++	__le32 dctl;
++	__le32 doepctl;
++	__le32 doepint;
++	__le32 grstctl;
++	__le32 gahbcfg;
++	__le32 status;
++};
++
++struct dwc2_r1_state {
++	u32 next_seq;
++	u32 count;
++	bool lost;
++	u8 trigger;
++	u8 stop_caller;
++	u8 bm_request_type;
++	u8 b_request;
++	u16 w_value;
++	u16 w_index;
++	u16 w_length;
++	u32 gsnpsid;
++	u32 ghwcfg2;
++	u32 ghwcfg3;
++	u32 ghwcfg4;
++	u32 caps_flags;
++	u32 reset_generation;
++	u32 setup_cfg0_seen;
++	u32 setup_cfgn_seen;
++	u32 setup_intf_seen;
++	u32 candidate_cfg0_seen;
++	u32 candidate_cfgn_seen;
++	u32 candidate_intf_seen;
++	struct dwc2_r1_rec ring[DWC2_R1_RING_SIZE];
++};
++
++struct dwc2_r1_dump_hdr {
++	__le32 magic;
++	__le32 version;
++	__le32 header_size;
++	__le32 record_size;
++	__le32 count;
++	__le32 lost;
++	__le32 next_seq;
++	__le32 caps_flags;
++	__le32 gsnpsid;
++	__le32 ghwcfg2;
++	__le32 ghwcfg3;
++	__le32 ghwcfg4;
++	__le32 reset_generation;
++	__le32 setup_cfg0_seen;
++	__le32 setup_cfgn_seen;
++	__le32 setup_intf_seen;
++	__le32 candidate_cfg0_seen;
++	__le32 candidate_cfgn_seen;
++	__le32 candidate_intf_seen;
++	__le32 reserved;
++};
++
++struct dwc2_r1_snapshot {
++	size_t len;
++	u8 data[];
++};
++
++static_assert(sizeof(struct dwc2_r1_rec) == 48);
++static_assert(sizeof(struct dwc2_r1_dump_hdr) == 80);
++
++static bool dwc2_r1_trackable_out_ep(struct dwc2_hsotg_ep *hs_ep)
++{
++	return hs_ep->index && !hs_ep->dir_in;
++}
++
++static struct dwc2_r1_rec *dwc2_r1_next_record_locked(struct dwc2_hsotg *hsotg)
++{
++	struct dwc2_r1_state *r1 = hsotg->r1;
++
++	if (!r1)
++		return NULL;
++	lockdep_assert_held(&hsotg->lock);
++	if (r1->lost)
++		return NULL;
++	if (r1->count >= DWC2_R1_RING_SIZE) {
++		r1->lost = true;
++		return NULL;
++	}
++
++	return &r1->ring[r1->count++];
++}
++
++/* New queue lifecycle: new seq, and HW-programmed proof starts false. */
++static void dwc2_r1_queue_lifecycle(struct dwc2_hsotg *hsotg,
++				    struct dwc2_hsotg_ep *hs_ep,
++				    struct dwc2_hsotg_req *hs_req)
++{
++	struct dwc2_r1_state *r1 = hsotg->r1;
++	u32 seq;
++
++	if (!r1 || !dwc2_r1_trackable_out_ep(hs_ep))
++		return;
++	lockdep_assert_held(&hsotg->lock);
++
++	seq = ++r1->next_seq;
++	if (!seq)
++		seq = ++r1->next_seq;
++	hs_req->trace_seq = seq;
++	hs_req->trace_hw_programmed = false;
++}
++
++/* Set only after the stock EPCTL write containing EPENA has completed. */
++static void dwc2_r1_mark_hw_programmed(struct dwc2_hsotg *hsotg,
++				       struct dwc2_hsotg_ep *hs_ep,
++				       struct dwc2_hsotg_req *hs_req,
++				       bool continuing, u32 programmed_ctrl)
++{
++	if (!hsotg->r1 || continuing || !dwc2_r1_trackable_out_ep(hs_ep) ||
++	    !using_dma(hsotg) || using_desc_dma(hsotg) ||
++	    !hs_req->trace_seq || !hs_req->req.length ||
++	    !(programmed_ctrl & DXEPCTL_EPENA) ||
++	    (programmed_ctrl & DXEPCTL_EPTYPE_MASK) != DXEPCTL_EPTYPE_BULK)
++		return;
++
++	hs_req->trace_hw_programmed = true;
++}
++
++static u8 dwc2_r1_classify_setup(const struct usb_ctrlrequest *ctrl)
++{
++	u16 w_value = le16_to_cpu(ctrl->wValue);
++	u16 w_index = le16_to_cpu(ctrl->wIndex);
++	u16 w_length = le16_to_cpu(ctrl->wLength);
++
++	if (ctrl->bRequestType ==
++	    (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE) &&
++	    ctrl->bRequest == USB_REQ_SET_CONFIGURATION && !w_index && !w_length)
++		return w_value ? DWC2_R1_TRIG_SET_CONFIG_NONZERO :
++				 DWC2_R1_TRIG_SET_CONFIG_ZERO;
++
++	if (ctrl->bRequestType ==
++	    (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) &&
++	    ctrl->bRequest == USB_REQ_SET_INTERFACE && !w_length)
++		return DWC2_R1_TRIG_SET_INTERFACE;
++
++	return DWC2_R1_TRIG_NONE;
++}
++
++static void dwc2_r1_clear_setup(struct dwc2_r1_state *r1)
++{
++	r1->trigger = DWC2_R1_TRIG_NONE;
++	r1->bm_request_type = 0;
++	r1->b_request = 0;
++	r1->w_value = 0;
++	r1->w_index = 0;
++	r1->w_length = 0;
++}
++
++static void dwc2_r1_setup_enter(struct dwc2_hsotg *hsotg,
++				const struct usb_ctrlrequest *ctrl)
++{
++	struct dwc2_r1_state *r1 = hsotg->r1;
++	u8 trigger;
++
++	if (!r1)
++		return;
++	lockdep_assert_held(&hsotg->lock);
++
++	trigger = dwc2_r1_classify_setup(ctrl);
++	dwc2_r1_clear_setup(r1);
++	if (trigger == DWC2_R1_TRIG_NONE)
++		return;
++
++	r1->trigger = trigger;
++	r1->bm_request_type = ctrl->bRequestType;
++	r1->b_request = ctrl->bRequest;
++	r1->w_value = le16_to_cpu(ctrl->wValue);
++	r1->w_index = le16_to_cpu(ctrl->wIndex);
++	r1->w_length = le16_to_cpu(ctrl->wLength);
++
++	switch (trigger) {
++	case DWC2_R1_TRIG_SET_CONFIG_ZERO:
++		r1->setup_cfg0_seen++;
++		break;
++	case DWC2_R1_TRIG_SET_CONFIG_NONZERO:
++		r1->setup_cfgn_seen++;
++		break;
++	case DWC2_R1_TRIG_SET_INTERFACE:
++		r1->setup_intf_seen++;
++		break;
++	default:
++		break;
++	}
++}
++
++static void dwc2_r1_setup_exit(struct dwc2_hsotg *hsotg)
++{
++	if (!hsotg->r1)
++		return;
++	lockdep_assert_held(&hsotg->lock);
++	dwc2_r1_clear_setup(hsotg->r1);
++}
++
++static void dwc2_r1_stop_enter(struct dwc2_hsotg *hsotg, u8 caller)
++{
++	if (hsotg->r1)
++		hsotg->r1->stop_caller = caller;
++}
++
++static void dwc2_r1_stop_exit(struct dwc2_hsotg *hsotg)
++{
++	if (hsotg->r1)
++		hsotg->r1->stop_caller = DWC2_R1_STOP_NONE;
++}
++
++/* Uses only the stock ep_disable() DOEPCTL read; no new pre-wait MMIO. */
++static void dwc2_r1_note_disable_candidate(struct dwc2_hsotg *hsotg,
++					   struct dwc2_hsotg_ep *hs_ep,
++					   u32 ctrl)
++{
++	struct dwc2_r1_state *r1 = hsotg->r1;
++	struct dwc2_hsotg_req *hs_req;
++
++	if (!r1 || r1->trigger == DWC2_R1_TRIG_NONE ||
++	    !dwc2_r1_trackable_out_ep(hs_ep) || !(ctrl & DXEPCTL_EPENA) ||
++	    (ctrl & DXEPCTL_EPTYPE_MASK) != DXEPCTL_EPTYPE_BULK ||
++	    !using_dma(hsotg) || using_desc_dma(hsotg))
++		return;
++
++	hs_req = hs_ep->req;
++	if (!hs_req || !hs_req->trace_seq || !hs_req->trace_hw_programmed ||
++	    !hs_req->req.length || hs_req->req.status != -EINPROGRESS)
++		return;
++
++	switch (r1->trigger) {
++	case DWC2_R1_TRIG_SET_CONFIG_ZERO:
++		r1->candidate_cfg0_seen++;
++		break;
++	case DWC2_R1_TRIG_SET_CONFIG_NONZERO:
++		r1->candidate_cfgn_seen++;
++		break;
++	case DWC2_R1_TRIG_SET_INTERFACE:
++		r1->candidate_intf_seen++;
++		break;
++	default:
++		break;
++	}
++}
++
++static void dwc2_r1_goutnak_timeout(struct dwc2_hsotg *hsotg,
++				    struct dwc2_hsotg_ep *hs_ep)
++{
++	struct dwc2_r1_state *r1 = hsotg->r1;
++	struct dwc2_hsotg_req *hs_req;
++	struct dwc2_r1_rec *rec;
++	u32 gintsts, dctl, epctl, epint, grstctl, gahbcfg;
++	u32 status = 0, seq = 0;
++	u16 flags = 0;
++
++	if (!r1 || !dwc2_r1_trackable_out_ep(hs_ep))
++		return;
++	lockdep_assert_held(&hsotg->lock);
++
++	rec = dwc2_r1_next_record_locked(hsotg);
++	if (!rec)
++		return;
++
++	/* T already occurred. Keep the first read closest to the timeout. */
++	gintsts = dwc2_readl(hsotg, GINTSTS);
++	dctl = dwc2_readl(hsotg, DCTL);
++	epctl = dwc2_readl(hsotg, DOEPCTL(hs_ep->index));
++	epint = dwc2_readl(hsotg, DOEPINT(hs_ep->index));
++	grstctl = dwc2_readl(hsotg, GRSTCTL);
++	gahbcfg = dwc2_readl(hsotg, GAHBCFG);
++	hs_req = hs_ep->req;
++
++	if (hs_req) {
++		seq = hs_req->trace_seq;
++		status = (u32)hs_req->req.status;
++		flags |= DWC2_R1_F_REQ_PRESENT;
++		if (hs_req->trace_hw_programmed)
++			flags |= DWC2_R1_F_HW_PROGRAMMED;
++		if (hs_req->req.status == -EINPROGRESS)
++			flags |= DWC2_R1_F_EINPROGRESS;
++		if (hs_req->req.length)
++			flags |= DWC2_R1_F_NONZERO_LENGTH;
++	}
++	if (epctl & DXEPCTL_EPENA)
++		flags |= DWC2_R1_F_EPENA;
++	if (!(epint & DXEPINT_XFERCOMPL))
++		flags |= DWC2_R1_F_NO_XFERCOMPL;
++	if ((epctl & DXEPCTL_EPTYPE_MASK) == DXEPCTL_EPTYPE_BULK)
++		flags |= DWC2_R1_F_BULK_OUT;
++	if (r1->stop_caller == DWC2_R1_STOP_DISABLE)
++		flags |= DWC2_R1_F_CALL_DISABLE;
++	else if (r1->stop_caller == DWC2_R1_STOP_DEQUEUE)
++		flags |= DWC2_R1_F_CALL_DEQUEUE;
++	if (gahbcfg & GAHBCFG_DMA_EN)
++		flags |= DWC2_R1_F_DMA_EN;
++
++	/* Diagnostic/classification bits: never load-bearing for R1 PASS. */
++	if (dctl & DCTL_GOUTNAKSTS)
++		flags |= DWC2_R1_F_GOUTNAK_STS;
++	if (epctl & DXEPCTL_NAKSTS)
++		flags |= DWC2_R1_F_EP_NAK_STS;
++	if (gintsts & GINTSTS_RXFLVL)
++		flags |= DWC2_R1_F_RXFLVL;
++	if (grstctl & GRSTCTL_AHBIDLE)
++		flags |= DWC2_R1_F_AHB_IDLE;
++	if (grstctl & GRSTCTL_DMAREQ)
++		flags |= DWC2_R1_F_DMAREQ;
++	if (gintsts & GINTSTS_GOUTNAKEFF)
++		flags |= DWC2_R1_F_GOUTNAKEFF_NOW;
++
++	memset(rec, 0, sizeof(*rec));
++	rec->seq = cpu_to_le32(seq);
++	rec->tag = cpu_to_le16(DWC2_R1_EV_GOUTNAKEFF_TIMEOUT);
++	rec->flags = cpu_to_le16(flags);
++	rec->w_value = cpu_to_le16(r1->w_value);
++	rec->w_index = cpu_to_le16(r1->w_index);
++	rec->w_length = cpu_to_le16(r1->w_length);
++	rec->bm_request_type = r1->bm_request_type;
++	rec->b_request = r1->b_request;
++	rec->trigger = r1->trigger;
++	rec->ep_index = hs_ep->index;
++	rec->gintsts = cpu_to_le32(gintsts);
++	rec->dctl = cpu_to_le32(dctl);
++	rec->doepctl = cpu_to_le32(epctl);
++	rec->doepint = cpu_to_le32(epint);
++	rec->grstctl = cpu_to_le32(grstctl);
++	rec->gahbcfg = cpu_to_le32(gahbcfg);
++	rec->status = cpu_to_le32(status);
++}
++
++static int dwc2_r1_init(struct dwc2_hsotg *hsotg)
++{
++	struct dwc2_r1_state *r1;
++
++	r1 = devm_kzalloc(hsotg->dev, sizeof(*r1), GFP_KERNEL);
++	if (!r1)
++		return -ENOMEM;
++
++	r1->gsnpsid = dwc2_readl(hsotg, GSNPSID);
++	r1->ghwcfg2 = dwc2_readl(hsotg, GHWCFG2);
++	r1->ghwcfg3 = dwc2_readl(hsotg, GHWCFG3);
++	r1->ghwcfg4 = dwc2_readl(hsotg, GHWCFG4);
++	if (hsotg->params.g_dma)
++		r1->caps_flags |= DWC2_R1_CAP_G_DMA;
++	if (hsotg->params.g_dma_desc)
++		r1->caps_flags |= DWC2_R1_CAP_G_DMA_DESC;
++	hsotg->r1 = r1;
++	return 0;
++}
++
++static void dwc2_r1_fill_header(struct dwc2_r1_dump_hdr *hdr,
++				 struct dwc2_r1_state *r1, u32 count)
++{
++	memset(hdr, 0, sizeof(*hdr));
++	hdr->magic = cpu_to_le32(DWC2_R1_DUMP_MAGIC);
++	hdr->version = cpu_to_le32(DWC2_R1_DUMP_VERSION);
++	hdr->header_size = cpu_to_le32(sizeof(*hdr));
++	hdr->record_size = cpu_to_le32(sizeof(struct dwc2_r1_rec));
++	hdr->count = cpu_to_le32(count);
++	hdr->lost = cpu_to_le32(r1->lost ? 1 : 0);
++	hdr->next_seq = cpu_to_le32(r1->next_seq);
++	hdr->caps_flags = cpu_to_le32(r1->caps_flags);
++	hdr->gsnpsid = cpu_to_le32(r1->gsnpsid);
++	hdr->ghwcfg2 = cpu_to_le32(r1->ghwcfg2);
++	hdr->ghwcfg3 = cpu_to_le32(r1->ghwcfg3);
++	hdr->ghwcfg4 = cpu_to_le32(r1->ghwcfg4);
++	hdr->reset_generation = cpu_to_le32(r1->reset_generation);
++	hdr->setup_cfg0_seen = cpu_to_le32(r1->setup_cfg0_seen);
++	hdr->setup_cfgn_seen = cpu_to_le32(r1->setup_cfgn_seen);
++	hdr->setup_intf_seen = cpu_to_le32(r1->setup_intf_seen);
++	hdr->candidate_cfg0_seen = cpu_to_le32(r1->candidate_cfg0_seen);
++	hdr->candidate_cfgn_seen = cpu_to_le32(r1->candidate_cfgn_seen);
++	hdr->candidate_intf_seen = cpu_to_le32(r1->candidate_intf_seen);
++}
++
++static int dwc2_r1_trace_open(struct inode *inode, struct file *file)
++{
++	struct dwc2_hsotg *hsotg = inode->i_private;
++	struct dwc2_r1_state *r1 = hsotg->r1;
++	struct dwc2_r1_snapshot *snap;
++	struct dwc2_r1_dump_hdr *hdr;
++	unsigned long irqflags;
++	u32 count;
++	size_t len;
++
++	if (!r1)
++		return -ENODEV;
++
++	spin_lock_irqsave(&hsotg->lock, irqflags);
++	count = r1->count;
++	spin_unlock_irqrestore(&hsotg->lock, irqflags);
++
++	len = sizeof(*hdr) + count * sizeof(struct dwc2_r1_rec);
++	snap = kvzalloc(sizeof(*snap) + len, GFP_KERNEL);
++	if (!snap)
++		return -ENOMEM;
++
++	hdr = (struct dwc2_r1_dump_hdr *)snap->data;
++	spin_lock_irqsave(&hsotg->lock, irqflags);
++	count = min(count, r1->count);
++	dwc2_r1_fill_header(hdr, r1, count);
++	memcpy(snap->data + sizeof(*hdr), r1->ring,
++	       count * sizeof(struct dwc2_r1_rec));
++	spin_unlock_irqrestore(&hsotg->lock, irqflags);
++
++	snap->len = sizeof(*hdr) + count * sizeof(struct dwc2_r1_rec);
++	file->private_data = snap;
++	return 0;
++}
++
++static ssize_t dwc2_r1_trace_read(struct file *file, char __user *buf,
++				  size_t len, loff_t *ppos)
++{
++	struct dwc2_r1_snapshot *snap = file->private_data;
++
++	return simple_read_from_buffer(buf, len, ppos, snap->data, snap->len);
++}
++
++static int dwc2_r1_trace_release(struct inode *inode, struct file *file)
++{
++	kvfree(file->private_data);
++	return 0;
++}
++
++static const struct file_operations dwc2_r1_trace_fops = {
++	.owner = THIS_MODULE,
++	.open = dwc2_r1_trace_open,
++	.read = dwc2_r1_trace_read,
++	.llseek = default_llseek,
++	.release = dwc2_r1_trace_release,
++};
++
++static ssize_t dwc2_r1_reset_write(struct file *file,
++				   const char __user *buf, size_t len,
++				   loff_t *ppos)
++{
++	struct dwc2_hsotg *hsotg = file->private_data;
++	struct dwc2_r1_state *r1 = hsotg->r1;
++	unsigned long irqflags;
++	char cmd[7];
++
++	if (!r1)
++		return -ENODEV;
++	if (!((len == 5) || (len == 6)))
++		return -EINVAL;
++	if (copy_from_user(cmd, buf, len))
++		return -EFAULT;
++	if (len == 5) {
++		if (memcmp(cmd, "clear", 5))
++			return -EINVAL;
++	} else if (memcmp(cmd, "clear\n", 6)) {
++		return -EINVAL;
++	}
++
++	spin_lock_irqsave(&hsotg->lock, irqflags);
++	if (r1->trigger != DWC2_R1_TRIG_NONE ||
++	    r1->stop_caller != DWC2_R1_STOP_NONE) {
++		spin_unlock_irqrestore(&hsotg->lock, irqflags);
++		return -EBUSY;
++	}
++	r1->count = 0;
++	r1->lost = false;
++	r1->setup_cfg0_seen = 0;
++	r1->setup_cfgn_seen = 0;
++	r1->setup_intf_seen = 0;
++	r1->candidate_cfg0_seen = 0;
++	r1->candidate_cfgn_seen = 0;
++	r1->candidate_intf_seen = 0;
++	r1->reset_generation++;
++	spin_unlock_irqrestore(&hsotg->lock, irqflags);
++
++	return len;
++}
++
++static int dwc2_r1_reset_open(struct inode *inode, struct file *file)
++{
++	file->private_data = inode->i_private;
++	return 0;
++}
++
++static const struct file_operations dwc2_r1_reset_fops = {
++	.owner = THIS_MODULE,
++	.open = dwc2_r1_reset_open,
++	.write = dwc2_r1_reset_write,
++	.llseek = no_llseek,
++};
++
++void dwc2_r1_debugfs_init(struct dwc2_hsotg *hsotg)
++{
++	if (!hsotg->r1)
++		return;
++
++	debugfs_create_file("r1_trace", 0444, hsotg->debug_root, hsotg,
++			    &dwc2_r1_trace_fops);
++	debugfs_create_file("r1_reset", 0200, hsotg->debug_root, hsotg,
++			    &dwc2_r1_reset_fops);
++}
++
++#else
++
++static inline void dwc2_r1_queue_lifecycle(struct dwc2_hsotg *hsotg,
++					    struct dwc2_hsotg_ep *hs_ep,
++					    struct dwc2_hsotg_req *hs_req) { }
++static inline void dwc2_r1_mark_hw_programmed(struct dwc2_hsotg *hsotg,
++					       struct dwc2_hsotg_ep *hs_ep,
++					       struct dwc2_hsotg_req *hs_req,
++					       bool continuing, u32 programmed_ctrl) { }
++static inline void dwc2_r1_setup_enter(struct dwc2_hsotg *hsotg,
++				       const struct usb_ctrlrequest *ctrl) { }
++static inline void dwc2_r1_setup_exit(struct dwc2_hsotg *hsotg) { }
++static inline void dwc2_r1_stop_enter(struct dwc2_hsotg *hsotg, u8 caller) { }
++static inline void dwc2_r1_stop_exit(struct dwc2_hsotg *hsotg) { }
++static inline void dwc2_r1_note_disable_candidate(struct dwc2_hsotg *hsotg,
++						   struct dwc2_hsotg_ep *hs_ep,
++						   u32 ctrl) { }
++static inline void dwc2_r1_goutnak_timeout(struct dwc2_hsotg *hsotg,
++					   struct dwc2_hsotg_ep *hs_ep) { }
++static inline int dwc2_r1_init(struct dwc2_hsotg *hsotg) { return 0; }
++
++#endif
+ 
+ /**
+  * dwc2_gadget_incr_frame_num - Increments the targeted frame number.
+@@ -1210,5 +1786,6 @@
+ 	dev_dbg(hsotg->dev, "%s: DxEPCTL=0x%08x\n", __func__, ctrl);
+ 	dwc2_writel(hsotg, ctrl, epctrl_reg);
++	dwc2_r1_mark_hw_programmed(hsotg, hs_ep, hs_req, continuing, ctrl);
+ 
+ 	/*
+ 	 * set these, it seems that DMA support increments past the end
+@@ -1478,5 +2055,6 @@
+ 	first = list_empty(&hs_ep->queue);
+ 	list_add_tail(&hs_req->queue, &hs_ep->queue);
++	dwc2_r1_queue_lifecycle(hs, hs_ep, hs_req);
+ 
+ 	/*
+ 	 * Handle DDMA isochronous transfers separately - just add new entry
+@@ -1982,5 +2560,7 @@
+ 	if (ret == 0 && hsotg->driver) {
++		dwc2_r1_setup_enter(hsotg, ctrl);
+ 		spin_unlock(&hsotg->lock);
+ 		ret = hsotg->driver->setup(&hsotg->gadget, ctrl);
+ 		spin_lock(&hsotg->lock);
++		dwc2_r1_setup_exit(hsotg);
+ 		if (ret < 0)
+@@ -3964,8 +4544,10 @@
+ 		/* Wait for global nak to take effect */
+ 		if (dwc2_hsotg_wait_bit_set(hsotg, GINTSTS,
+-					    GINTSTS_GOUTNAKEFF, 100))
++					    GINTSTS_GOUTNAKEFF, 100)) {
++			dwc2_r1_goutnak_timeout(hsotg, hs_ep);
+ 			dev_warn(hsotg->dev, "%s: timeout GINTSTS.GOUTNAKEFF\n",
+ 				 __func__);
++		}
+ 	}
+ 
+ 	/* Disable ep */
+@@ -4271,6 +4853,10 @@
+ 	ctrl = dwc2_readl(hsotg, epctrl_reg);
+ 
+-	if (ctrl & DXEPCTL_EPENA)
++	if (ctrl & DXEPCTL_EPENA) {
++		dwc2_r1_note_disable_candidate(hsotg, hs_ep, ctrl);
++		dwc2_r1_stop_enter(hsotg, DWC2_R1_STOP_DISABLE);
+ 		dwc2_hsotg_ep_stop_xfr(hsotg, hs_ep);
++		dwc2_r1_stop_exit(hsotg);
++	}
+ 
+ 	ctrl &= ~DXEPCTL_EPENA;
+@@ -4347,5 +4933,8 @@
+ 	/* Dequeue already started request */
+-	if (req == &hs_ep->req->req)
++	if (req == &hs_ep->req->req) {
++		dwc2_r1_stop_enter(hs, DWC2_R1_STOP_DEQUEUE);
+ 		dwc2_hsotg_ep_stop_xfr(hs, hs_ep);
++		dwc2_r1_stop_exit(hs);
++	}
+ 
+ 	dwc2_hsotg_complete_request(hs, hs_ep, hs_req, -ECONNRESET);
+@@ -5006,4 +5595,8 @@
+ 		return ret;
+ 	}
+ 
++	ret = dwc2_r1_init(hsotg);
++	if (ret)
++		return ret;
++
+ 	hsotg->ctrl_buff = devm_kzalloc(hsotg->dev,

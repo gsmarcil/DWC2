@@ -1,0 +1,6 @@
+make[1]: Entering directory '/home/claude/b-arm-n'
+  UPD     include/config/kernel.release
+  UPD     include/generated/utsrelease.h
+  CC      drivers/usb/dwc2/gadget.o
+  AR      drivers/usb/dwc2/built-in.a
+make[1]: Leaving directory '/home/claude/b-arm-n'

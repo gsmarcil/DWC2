@@ -1,15 +1,18 @@
 #!/bin/sh
-# Fail-closed repository completeness gate.
+# Fail-closed repository integrity and campaign-readiness gate.
 #
 # This script intentionally fails while baseline/ is only a fragment.
-# A PASS means the checked-in baseline is byte-identical to its manifest and
-# the epoch contract can be resolved from the checked-in executable tooling.
+# Baseline integrity and holder-producer readiness are reported independently:
+# a canonical v4.2 baseline can remain intact while the next campaign is
+# blocked because its device producer cannot satisfy the active holder merger.
 set -u
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$ROOT" || exit 2
 
 fail=0
+baseline_fail=0
+holder_fail=0
 
 pass() { printf '%-34s %s\n' "$1" PASS; }
 failmsg() { printf '%-34s %s\n' "$1" FAIL >&2; fail=1; }
@@ -135,6 +138,11 @@ else
     failmsg epoch_local_resolution
 fi
 
+# Snapshot baseline integrity before checking repository-external campaign
+# sources.  A later producer failure must never be mislabeled as a damaged
+# canonical archive requiring re-import.
+baseline_fail=$fail
+
 # 3. Canonical load-bearing harness source locations for the next campaign.
 # These are repository-source completeness checks, not runtime binary hashes.
 for spec in \
@@ -151,10 +159,35 @@ do
     fi
 done
 
-if [ "$fail" -ne 0 ]; then
+# Presence alone is not capability.  Because holder_merger is in the active
+# keyset, the device source must expose the JSONL producer contract consumed by
+# baseline/pipeline/holder_merge.py.  The checker also fails if the consumer
+# contract drifts, so a stale hard-coded test cannot silently remain green.
+holder_tmp=${TMPDIR:-/tmp}/dwc2-holder-contract.$$
+if python3 verify_holder_contract.py >"$holder_tmp" 2>&1; then
+    pass holder_producer_contract
+else
+    failmsg holder_producer_contract
+    sed 's/^/  /' "$holder_tmp" >&2
+    holder_fail=1
+fi
+rm -f "$holder_tmp"
+
+if [ "$baseline_fail" -eq 0 ]; then
+    printf '%s\n' 'REPOSITORY_BASELINE: PASS'
+else
     printf '%s\n' 'REPOSITORY_BASELINE: INCOMPLETE / RE-IMPORT REQUIRED' >&2
+fi
+
+if [ "$holder_fail" -ne 0 ]; then
+    printf '%s\n' 'HOLDER_CAMPAIGN_READINESS: BLOCKED / PRODUCER INCOMPATIBLE' >&2
+fi
+
+if [ "$fail" -ne 0 ]; then
+    printf '%s\n' 'REPOSITORY_GATE: FAIL' >&2
     exit 1
 fi
 
-printf '%s\n' 'REPOSITORY_BASELINE: PASS'
+printf '%s\n' 'HOLDER_CAMPAIGN_READINESS: PASS'
+printf '%s\n' 'REPOSITORY_GATE: PASS'
 exit 0

@@ -1,0 +1,20 @@
+v6.3.1 denominator ordering audit
+
+Observed v6.3.1 order in ep_disable:
+  dwc2_r1_note_disable_candidate(...)
+  dwc2_r1_stop_enter(...)
+  dwc2_hsotg_ep_stop_xfr(...)
+
+But note_disable_candidate reads r1->stop_causal, which stop_enter establishes.
+Therefore the current stop's cause was not available to denominator accounting.
+
+v6.3.2 required order:
+  dwc2_r1_stop_enter(...)
+  dwc2_r1_note_disable_candidate(...)
+  dwc2_hsotg_ep_stop_xfr(...)
+
+Same correction is applied to active ep_dequeue for one invariant across both
+Bulk-OUT stop families.
+
+Semantic consequence: candidate counters change meaning, therefore dump version
+must change 8 -> 9 even though header/record sizes stay 112/80.

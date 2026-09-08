@@ -1,0 +1,17 @@
+R1A evidence pipeline v4.2 — pre-runtime selftests
+
+manifest_selftest.py          67/67 PASS
+gate_selftest.py               7/7 PASS
+verdict_selftest.py           19/19 PASS
+witness_selftest.py            4/4 PASS
+pipeline_selftest.py           5/5 PASS
+freeze_epoch_selftest.py       8/8 PASS
+freeze_epoch --check-only      PASS
+
+The frozen v9 classifier remains byte-identical and is imported by v9.1.
+v4.2 changes provenance/freeze plumbing only: the v9.1 wrapper hashes the exact
+Python modules it resolved at runtime; freeze_epoch consumes that runtime map;
+the host accepts the resulting epoch.json directly and refuses manual/hash
+mixing.
+
+Runtime USB/DWC2 execution: NOT EXECUTED.

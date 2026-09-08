@@ -1,0 +1,13 @@
+dwc2_r1_rec (size 88)
+  FAIL size is 80
+  FAIL no padding holes: gintsts at 24, expected 20; setup_cookie at 56, expected 52
+  ok   fields fill the struct (88 of 88)
+
+dwc2_r1_dump_hdr (size 112)
+  ok   size is 112
+  ok   no padding holes
+  ok   fields fill the struct (112 of 112)
+
+V6.3 ABI CHECK: 2 FAILURE(S)
+exit status: 1
+ABI NEGATIVE SELFTEST: PASS

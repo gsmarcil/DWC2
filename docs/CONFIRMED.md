@@ -1,6 +1,9 @@
 # Confirmed findings
 
-This file contains only claims that are currently accepted from pinned source or separately verified historical artifacts. It does **not** treat the present `baseline/` directory as reproducible evidence until the repository completeness gate passes.
+This file contains only claims that are currently accepted from pinned source or
+separately verified artifacts. The canonical v4.2 `baseline/` is reproducible
+while its 89-path integrity and executable package gates pass; overall campaign
+readiness is a separate state.
 
 ## 1. Source-level teardown ordering
 
@@ -22,7 +25,7 @@ For re-arming, `USBDEVFS_RESETEP` resets host-side endpoint state (toggle/sequen
 
 These are source/tooling facts. **Real R1A execution on a DWC2 board remains pending.**
 
-## 3. Pre-runtime tooling — historical verification only
+## 3. Pre-runtime tooling — canonical v4.2 verified
 
 Separately verified frozen artifacts from earlier clean-room runs recorded successful pre-runtime checks for:
 
@@ -35,17 +38,23 @@ Separately verified frozen artifacts from earlier clean-room runs recorded succe
 - epoch/provenance binding;
 - deterministic/fail-closed packaging gates.
 
-Those historical verification results remain valid statements about the artifacts that were actually tested. They are **not currently reproducible from this GitHub tree**, because the checked-in `baseline/` is incomplete and contains files that do not all match `baseline/SHA256SUMS`. The current fragment is documented in [`BASELINE-STATUS.md`](BASELINE-STATUS.md).
+Those results are now reproducible from the byte-identical canonical v4.2 import.
+The archive's external SHA256, internal 89-path manifest, package verification,
+and baseline integrity gate passed during import. See
+[`CANONICAL-IMPORT-RECEIPT-v4.2.md`](CANONICAL-IMPORT-RECEIPT-v4.2.md).
 
 Therefore the current repository state is:
 
 ```text
-checked-in pre-runtime baseline    INCOMPLETE / RE-IMPORT REQUIRED
+checked-in pre-runtime baseline    VERIFIED / CANONICAL v4.2
 historical clean-room results      RETAINED AS HISTORICAL EVIDENCE
-current-tree reproducibility       NOT ESTABLISHED
+current-tree baseline reproducibility ESTABLISHED
+holder campaign readiness             BLOCKED / PRODUCER INCOMPATIBLE
 ```
 
-`./VERIFY-REPOSITORY.sh` must pass from a clean checkout before this section may again describe the repository itself as containing a verified baseline.
+`./VERIFY-REPOSITORY.sh` currently must preserve
+`REPOSITORY_BASELINE: PASS` while failing the incompatible holder producer. This
+pre-runtime verification does not promote any runtime claim.
 
 The runtime boundary remains:
 

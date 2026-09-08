@@ -1,0 +1,8 @@
+The two configs differ only in the observer symbol:
+
+1722d1721
+< CONFIG_DWC2_REQ_UNMAP_R1_OBSERVER=y
+
+observer symbol in each:
+b-arm-y/.config:CONFIG_DWC2_REQ_UNMAP_R1_OBSERVER=y
+b-arm-n/.config:# CONFIG_DWC2_REQ_UNMAP_R1_OBSERVER is not set

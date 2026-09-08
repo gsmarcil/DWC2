@@ -1,0 +1,30 @@
+/tmp/abi_gen.11s3cjs7/abi_probe.c: 27 record fields, 28 header fields
+regenerated probe from /home/claude/k/drivers/usb/dwc2/gadget.c
+
+dwc2_r1_rec (size 80)
+  ok   size is 80
+  ok   no padding holes
+  ok   fields fill the struct (80 of 80)
+
+dwc2_r1_dump_hdr (size 112)
+  ok   size is 112
+  ok   no padding holes
+  ok   fields fill the struct (112 of 112)
+
+analyzer format strings
+  ok   REC_FMT packs to 80
+  ok   HDR_FMT packs to 112
+  ok   REC_FMT field count matches the struct
+  ok   HDR_FMT field count matches the struct
+
+round-trip: pack a record, read fields back at driver offsets
+  ok   packed record is 80 bytes
+  ok   setup_cookie at offset 48 reads 0x1122334455667788
+  ok   req_dma at offset 56 reads 0xdeadbeef
+  ok   causal_state at offset 18 reads 0x2
+  ok   mapping_class at offset 19 reads 0x3
+  ok   flags2 at offset 76 reads 0x19
+  ok   owner_cpu at offset 78 reads 0x2
+  ok   req_length at offset 64 reads 0x1000
+
+V6.3 ABI CHECK: all checks passed

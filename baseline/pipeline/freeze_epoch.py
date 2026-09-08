@@ -88,6 +88,9 @@ def derive_contract():
         p = Path(value).resolve()
         if not p.is_file():
             raise FreezeError(f'local epoch artifact {key} is not a file: {p}')
+        # Every local load-bearing tool must resolve beside this frozen gate.
+        # This prevents PYTHONPATH/site-packages shadowing from being silently
+        # frozen as if it were package-local evidence tooling.
         if p.parent != HERE:
             raise FreezeError(f'local epoch artifact {key} resolved outside package: {p}')
         local[key] = p

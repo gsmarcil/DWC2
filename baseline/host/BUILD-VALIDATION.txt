@@ -1,0 +1,7 @@
+HOST V4 FINAL VALIDATION
+build: -O2 -Wall -Wextra -Werror PASS
+selftest.sh: PASS
+rule_crosscheck: PASS (560 re-arm + 768 denominator = 1328 rows)
+ASan+UBSan via full selftest.sh: PASS
+gcc -fanalyzer: 0 diagnostics
+real USB / DWC2 runtime: NOT EXECUTED
