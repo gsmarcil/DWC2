@@ -7,7 +7,8 @@ This private repository is the canonical research workspace for the DWC2 investi
 `main` carries the current, reviewable state only:
 
 - the userspace evidence pipeline;
-- the host harness and its tests;
+- the host harness and its tests under `r1a-host/`;
+- the gadget-side holder harness under `r1a-device/`;
 - the DWC2 observer/patch chain and its verification tools;
 - the canonical harness specification;
 - top-level verification entry points;
@@ -17,6 +18,19 @@ This private repository is the canonical research workspace for the DWC2 investi
 A full Linux source tree is deliberately not vendored. The frozen upstream pin and patch chain are sufficient to reproduce the instrumented tree.
 
 Every instrumentation/observer component is TEST-ONLY and must not be described as a production kernel fix.
+
+## Epoch completeness
+
+Any artifact named by the active `EPOCH_ARTIFACTS` contract is load-bearing evidence infrastructure. It may not exist only as a manifest key or operator-supplied hash.
+
+For an epoch to be self-contained, every such artifact must have one of the following inside the canonical repository:
+
+1. the exact source/binary that is hashed at runtime; or
+2. a reproducible, byte-verifiable derivation anchored by canonical source plus the build inputs required by the frozen contract.
+
+This applies equally to host and device harnesses. If `device_harness` is present in the active epoch contract, the exact tested `r1a_ffs_out_v2.c` source belongs under `r1a-device/` and must be pinned before negative evidence can be accumulated under that epoch.
+
+Do not synthesize missing epoch sources from documentation or memory.
 
 ## Evidence
 
