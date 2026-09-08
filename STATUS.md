@@ -12,7 +12,7 @@ SECURITY BOUNDARY IMPACT           UNKNOWN
 FINAL SEVERITY                     UNRESOLVED
 ```
 
-The checked-in `baseline/` directory is currently a fragment, not a verified executable baseline. `baseline/SHA256SUMS` pins a larger canonical package than the files presently committed, and some committed files do not match those pinned bytes.
+The checked-in `baseline/` directory is currently a fragment, not a verified executable baseline. `baseline/SHA256SUMS` pins a larger canonical package than the files presently committed, and some committed files do not match those pinned bytes. See [`docs/BASELINE-STATUS.md`](docs/BASELINE-STATUS.md) for the detailed fragment audit.
 
 Repository readiness is therefore fail-closed behind:
 
