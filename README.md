@@ -25,7 +25,9 @@ Research repository for the Linux DWC2 gadget request-unmap lifetime hypothesis 
 
 **No memory-corruption claim is made in this repository.**
 
-The current evidence/tooling baseline is under [`baseline/`](baseline/). It closes the pre-runtime evidence/provenance pipeline; it does not substitute for real hardware evidence.
+The current evidence/tooling baseline is under [`baseline/`](baseline/). It closes the pre-runtime evidence/provenance pipeline represented by that frozen snapshot; it does not substitute for real hardware evidence.
+
+A newer expanded epoch definition is being assembled on top of that baseline. It treats the gadget-side `device_harness` as load-bearing, so [`r1a-device/`](r1a-device/) is now a first-class repository component beside the host harness. The original tested `r1a_ffs_out_v2.c` source still needs to be imported byte-for-byte before that next epoch can be considered self-contained.
 
 ## Evidence ladder
 
@@ -43,6 +45,8 @@ Each transition requires its own artifact. A later claim is never inferred from 
 
 ## Repository map
 
+- [`r1a-host/`](r1a-host/) — canonical host-side harness location.
+- [`r1a-device/`](r1a-device/) — canonical gadget-side FunctionFS holder harness location; `r1a_ffs_out_v2.c` must be imported here before the expanded epoch is frozen.
 - [`docs/HISTORY.md`](docs/HISTORY.md) — research history, keeping only conclusions that survived later audits.
 - [`docs/CONFIRMED.md`](docs/CONFIRMED.md) — facts currently accepted.
 - [`docs/PIO-RX-TRACK.md`](docs/PIO-RX-TRACK.md) — separate source-proven PIO RX boundary finding.
@@ -58,6 +62,8 @@ Each transition requires its own artifact. A later claim is never inferred from 
 ## Working rule
 
 From this point onward, GitHub `main` is the canonical research record. New experiments, tooling changes, and evidence should be committed here with explicit epoch/provenance impact. Local copies are working copies only until their hashes/changes are recorded in this repository.
+
+No load-bearing epoch artifact may exist only as a name in a manifest. Its source or binary provenance must be present or reproducibly anchored in the repository before a new negative-evidence epoch is accepted.
 
 ## Reporting discipline
 
