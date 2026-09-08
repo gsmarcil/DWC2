@@ -9,7 +9,7 @@ Research repository for the Linux DWC2 gadget request-unmap lifetime hypothesis 
 - Kernel: `torvalds/linux`
 - Pin: `f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8`
 - Primary path: `drivers/usb/dwc2/gadget.c`
-- Observer: r3 / ABI v9 (`header=112`, `record=80`)
+- Observer lineage: r3 / ABI v9 (`header=112`, `record=80`)
 
 ## Current status
 
@@ -17,6 +17,7 @@ Research repository for the Linux DWC2 gadget request-unmap lifetime hypothesis 
 |---|---|
 | Source path: stop-timeout may continue into teardown | **SOURCE-PROVEN** |
 | Source path: request DMA mapping is unmapped before giveback | **SOURCE-PROVEN** |
+| Checked-in pre-runtime baseline | **INCOMPLETE / RE-IMPORT REQUIRED** |
 | R1A trigger/reachability on real DWC2 hardware | **NOT EXECUTED** |
 | Real `UNMAP_DONE` for the timed-out request | **NOT PROVEN** |
 | Post-unmap DMA attempt (`D_issue`) | **UNKNOWN** |
@@ -25,9 +26,13 @@ Research repository for the Linux DWC2 gadget request-unmap lifetime hypothesis 
 
 **No memory-corruption claim is made in this repository.**
 
-The current evidence/tooling baseline is under [`baseline/`](baseline/). It closes the pre-runtime evidence/provenance pipeline represented by that frozen snapshot; it does not substitute for real hardware evidence.
+The existing `baseline/` directory is currently a fragment of a previously verified package, not a reproducible baseline. Historical clean-room results are retained as historical evidence, but the checked-in tree must not be called verified until:
 
-A newer expanded epoch definition is being assembled on top of that baseline. It treats the gadget-side `device_harness` as load-bearing, so [`r1a-device/`](r1a-device/) is now a first-class repository component beside the host harness. The original tested `r1a_ffs_out_v2.c` source still needs to be imported byte-for-byte before that next epoch can be considered self-contained.
+```sh
+./VERIFY-REPOSITORY.sh
+```
+
+passes from a clean checkout after canonical re-import.
 
 ## Evidence ladder
 
@@ -45,8 +50,8 @@ Each transition requires its own artifact. A later claim is never inferred from 
 
 ## Repository map
 
-- [`r1a-host/`](r1a-host/) — canonical host-side harness location.
-- [`r1a-device/`](r1a-device/) — canonical gadget-side FunctionFS holder harness location; `r1a_ffs_out_v2.c` must be imported here before the expanded epoch is frozen.
+- [`r1a-host/`](r1a-host/) — canonical location for the host-side harness source in the next complete epoch.
+- [`r1a-device/`](r1a-device/) — canonical location for the FunctionFS holder producer; original `r1a_ffs_out_v2.c` still requires import.
 - [`docs/HISTORY.md`](docs/HISTORY.md) — research history, keeping only conclusions that survived later audits.
 - [`docs/CONFIRMED.md`](docs/CONFIRMED.md) — facts currently accepted.
 - [`docs/PIO-RX-TRACK.md`](docs/PIO-RX-TRACK.md) — separate source-proven PIO RX boundary finding.
@@ -57,13 +62,14 @@ Each transition requires its own artifact. A later claim is never inferred from 
 - [`docs/RUNTIME-RUNBOOK.md`](docs/RUNTIME-RUNBOOK.md) — next hardware campaign.
 - [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) — attacker/precondition boundaries.
 - [`docs/PROVENANCE.md`](docs/PROVENANCE.md) — frozen artifacts and epoch rules.
-- [`baseline/`](baseline/) — verified pre-runtime tooling and kernel observer package.
+- [`baseline/`](baseline/) — **fragment pending canonical re-import**; `SHA256SUMS` is a reference manifest, not proof of current completeness.
+- [`VERIFY-REPOSITORY.sh`](VERIFY-REPOSITORY.sh) — fail-closed repository completeness gate.
 
 ## Working rule
 
-From this point onward, GitHub `main` is the canonical research record. New experiments, tooling changes, and evidence should be committed here with explicit epoch/provenance impact. Local copies are working copies only until their hashes/changes are recorded in this repository.
+GitHub `main` is the canonical research record. New experiments, tooling changes, and evidence should be committed here with explicit epoch/provenance impact. Local copies are working copies only until their exact bytes/hashes are recorded in this repository.
 
-No load-bearing epoch artifact may exist only as a name in a manifest. Its source or binary provenance must be present or reproducibly anchored in the repository before a new negative-evidence epoch is accepted.
+Do not repair a missing canonical epoch source by recreating it from documentation or memory. Import the original verified artifact, then verify it byte-for-byte.
 
 ## Reporting discipline
 
@@ -71,4 +77,4 @@ Use only these epistemic labels unless a stronger artifact is present:
 
 `SOURCE-PROVEN` · `RUNTIME-PROVEN` · `NOT PROVEN` · `UNKNOWN`
 
-Absence of a timeout on a tested configuration is **not** `R1_DISPROVEN`; the strongest allowed negative is a configuration-scoped `NOT_OBSERVED` verdict emitted by the frozen gate after all eligibility checks pass.
+Absence of a timeout on a tested configuration is **not** `R1_DISPROVEN`; the strongest allowed negative is a configuration-scoped `NOT_OBSERVED` verdict emitted by a complete frozen gate after all eligibility checks pass.
