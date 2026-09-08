@@ -1,6 +1,9 @@
 # Confirmed findings
 
-This file contains only claims that are currently accepted from pinned source or separately verified artifacts. The canonical v4.2 `baseline/` is reproducible only while the repository completeness gate passes.
+This file contains only claims that are currently accepted from pinned source or
+separately verified artifacts. The canonical v4.2 `baseline/` is reproducible
+while its 89-path integrity and executable package gates pass; overall campaign
+readiness is a separate state.
 
 ## 1. Source-level teardown ordering
 
@@ -37,7 +40,7 @@ Separately verified frozen artifacts from earlier clean-room runs recorded succe
 
 Those results are now reproducible from the byte-identical canonical v4.2 import.
 The archive's external SHA256, internal 89-path manifest, package verification,
-and repository gate passed during import. See
+and baseline integrity gate passed during import. See
 [`CANONICAL-IMPORT-RECEIPT-v4.2.md`](CANONICAL-IMPORT-RECEIPT-v4.2.md).
 
 Therefore the current repository state is:
@@ -45,10 +48,12 @@ Therefore the current repository state is:
 ```text
 checked-in pre-runtime baseline    VERIFIED / CANONICAL v4.2
 historical clean-room results      RETAINED AS HISTORICAL EVIDENCE
-current-tree reproducibility       ESTABLISHED BY REPOSITORY GATE
+current-tree baseline reproducibility ESTABLISHED
+holder campaign readiness             BLOCKED / PRODUCER INCOMPATIBLE
 ```
 
-`./VERIFY-REPOSITORY.sh` must continue to pass from clean checkouts. This
+`./VERIFY-REPOSITORY.sh` currently must preserve
+`REPOSITORY_BASELINE: PASS` while failing the incompatible holder producer. This
 pre-runtime verification does not promote any runtime claim.
 
 The runtime boundary remains:

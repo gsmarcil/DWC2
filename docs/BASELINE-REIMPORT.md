@@ -14,7 +14,9 @@ hashes happen to pass.
 5. replace the repository `baseline/` from those canonical bytes as one import operation;
 6. do not normalize, reformat, regenerate, or hand-copy load-bearing files during import;
 7. run `./VERIFY-REPOSITORY.sh` from a clean checkout;
-8. only after PASS may `STATUS.md` promote the checked-in tree to a verified baseline.
+8. only after `REPOSITORY_BASELINE: PASS` may `STATUS.md` promote the
+   checked-in baseline; overall campaign readiness may remain blocked by a
+   repository-external producer contract.
 
 ## Completion state
 
@@ -22,8 +24,9 @@ hashes happen to pass.
 A. repository status corrected to INCOMPLETE                 COMPLETE
 B. completeness gate committed                               COMPLETE
 C. canonical baseline imported byte-for-byte                 COMPLETE
-D. completeness gate PASS recorded                           COMPLETE
-E. original r1a_ffs_out_v2.c placed at canonical path        COMPLETE
+D. baseline integrity PASS recorded                          COMPLETE
+E. legacy r1a_ffs_out_v2.c identity preserved                COMPLETE
+E2. compatible holder-event producer imported                BLOCKED / MISSING
 F. expanded predicate/epoch set imported and reverified      PENDING
 G. real DWC2 runtime qualification                            PENDING
 ```
@@ -36,8 +39,8 @@ Do not combine these steps into one unreviewable repair commit. The intended ord
 A. repository status corrected to INCOMPLETE
 B. completeness gate committed
 C. canonical baseline imported byte-for-byte
-D. completeness gate PASS recorded
-E. original r1a_ffs_out_v2.c imported and pinned
+D. baseline integrity PASS recorded
+E. compatible r1a_ffs_out_v2.c imported, exercised and pinned
 F. expanded predicate/epoch set imported and reverified
 G. real DWC2 runtime qualification
 ```

@@ -18,6 +18,7 @@ Research repository for the Linux DWC2 gadget request-unmap lifetime hypothesis 
 | Source path: stop-timeout may continue into teardown | **SOURCE-PROVEN** |
 | Source path: request DMA mapping is unmapped before giveback | **SOURCE-PROVEN** |
 | Checked-in pre-runtime baseline | **VERIFIED — canonical v4.2 import** |
+| Holder event producer compatible with active `holder_merger` | **BLOCKED — imported source is incompatible** |
 | R1A trigger/reachability on real DWC2 hardware | **NOT EXECUTED** |
 | Real `UNMAP_DONE` for the timed-out request | **NOT PROVEN** |
 | Post-unmap DMA attempt (`D_issue`) | **UNKNOWN** |
@@ -28,14 +29,18 @@ Research repository for the Linux DWC2 gadget request-unmap lifetime hypothesis 
 
 The `baseline/` directory is a byte-identical import of the independently
 authenticated v4.2 archive. Its 89 pinned paths and executable pre-runtime gates
-are reproducible from this tree. Repository completeness remains gated by:
+are reproducible from this tree. Repository and campaign readiness are gated by:
 
 ```sh
 ./VERIFY-REPOSITORY.sh
 ```
 
-The canonical import passed this gate. This is a pre-runtime tooling result only;
-it does not change the R1A/R2/R3 runtime states below.
+The baseline-integrity portion reports `REPOSITORY_BASELINE: PASS`. The overall
+gate intentionally exits nonzero because the currently preserved device source
+cannot produce the JSONL contract consumed by the active `holder_merger`. See
+[`docs/HOLDER-PRODUCER-CONTRACT.md`](docs/HOLDER-PRODUCER-CONTRACT.md). This does
+not invalidate the imported v4.2 bytes, and it does not change the R1A/R2/R3
+runtime states below.
 
 ## Evidence ladder
 
@@ -54,7 +59,7 @@ Each transition requires its own artifact. A later claim is never inferred from 
 ## Repository map
 
 - [`r1a-host/`](r1a-host/) — canonical location for the host-side harness source in the next complete epoch.
-- [`r1a-device/`](r1a-device/) — canonical location for the imported FunctionFS holder producer; binding it into the next expanded epoch remains pending.
+- [`r1a-device/`](r1a-device/) — canonical location for the preserved legacy FunctionFS source; the compatible holder-event producer is still missing.
 - [`docs/HISTORY.md`](docs/HISTORY.md) — research history, keeping only conclusions that survived later audits.
 - [`docs/CONFIRMED.md`](docs/CONFIRMED.md) — facts currently accepted.
 - [`docs/PIO-RX-TRACK.md`](docs/PIO-RX-TRACK.md) — separate source-proven PIO RX boundary finding.
@@ -66,7 +71,7 @@ Each transition requires its own artifact. A later claim is never inferred from 
 - [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) — attacker/precondition boundaries.
 - [`docs/PROVENANCE.md`](docs/PROVENANCE.md) — frozen artifacts and epoch rules.
 - [`baseline/`](baseline/) — canonical v4.2 pre-runtime package; `SHA256SUMS` pins all 89 imported paths.
-- [`VERIFY-REPOSITORY.sh`](VERIFY-REPOSITORY.sh) — fail-closed repository completeness gate.
+- [`VERIFY-REPOSITORY.sh`](VERIFY-REPOSITORY.sh) — fail-closed baseline-integrity and campaign-readiness gate.
 
 ## Working rule
 

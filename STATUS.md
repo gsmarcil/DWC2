@@ -4,6 +4,8 @@
 SOURCE PATH / TEARDOWN ORDER       SOURCE-PROVEN
 CURRENT REPOSITORY BASELINE        VERIFIED / CANONICAL v4.2 IMPORT
 PRE-RUNTIME TOOLCHAIN              REPRODUCIBLE / VERIFIED (RUNTIME NOT EXECUTED)
+HOLDER PRODUCER CONTRACT           BLOCKED / LEGACY SOURCE INCOMPATIBLE
+OVERALL REPOSITORY GATE            FAIL-CLOSED (EXPECTED)
 R1A REAL DWC2 RUNTIME              NOT EXECUTED
 REAL UNMAP IN TESTED ATTEMPT       NOT PROVEN
 D_issue                            UNKNOWN
@@ -25,17 +27,21 @@ The fragment audit and closure evidence are recorded in
 [`docs/BASELINE-STATUS.md`](docs/BASELINE-STATUS.md) and
 [`docs/CANONICAL-IMPORT-RECEIPT-v4.2.md`](docs/CANONICAL-IMPORT-RECEIPT-v4.2.md).
 
-Repository readiness is therefore fail-closed behind:
+Repository and campaign readiness are fail-closed behind:
 
 ```sh
 ./VERIFY-REPOSITORY.sh
 ```
 
-The canonical import passes this gate. Runtime was not executed by the import.
+The baseline portion reports `REPOSITORY_BASELINE: PASS`. The overall gate now
+exits 1 with `HOLDER_CAMPAIGN_READINESS: BLOCKED / PRODUCER INCOMPATIBLE` because
+the active `holder_merger` consumes a JSONL schema that the preserved device
+source cannot emit. Runtime was not executed by the import.
 
 Next actions, in order:
 
-1. keep `./VERIFY-REPOSITORY.sh` passing from clean checkouts;
-2. bind the imported `r1a-device/r1a_ffs_out_v2.c` source and its built harness into the next expanded epoch before accepting negative runtime evidence;
-3. import/reverify the expanded predicate set;
-4. proceed toward real DWC2 runtime qualification.
+1. obtain the original producer that emits the active holder JSONL contract;
+2. require `verify_holder_contract.py` and the overall repository gate to PASS;
+3. pin that source and its exact built harness in the next expanded epoch;
+4. import/reverify the expanded predicate set;
+5. proceed toward real DWC2 runtime qualification.

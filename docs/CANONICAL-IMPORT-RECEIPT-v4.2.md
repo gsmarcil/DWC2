@@ -26,14 +26,19 @@ fresh-extract internal SHA256SUMS               89/89 PASS
 fresh-extract ./VERIFY.sh                       PASS (runtime not executed)
 baseline bytes after import                     89/89 PASS
 canonical host source byte identity             PASS
-canonical device source byte identity           PASS
-./VERIFY-REPOSITORY.sh                          REPOSITORY_BASELINE: PASS
+legacy device source copy identity              PASS
+./VERIFY-REPOSITORY.sh at import commit         REPOSITORY_BASELINE: PASS
 ```
 
 The host source was imported from the canonical v4.2 archive. The device source
-was copied byte-for-byte from the pre-existing uploaded root artifact; it is not
-retroactively part of the historical v4.2 epoch. Its binding to a future
-expanded epoch remains pending.
+was copied byte-for-byte from the pre-existing uploaded root artifact (retained
+in Git history); it is not retroactively part of the historical v4.2 epoch.
+
+A post-import capability audit established that this device revision is not the
+holder-event producer consumed by `baseline/pipeline/holder_merge.py`. The
+current overall repository gate therefore exits nonzero while retaining
+`REPOSITORY_BASELINE: PASS`. See
+[`HOLDER-PRODUCER-CONTRACT.md`](HOLDER-PRODUCER-CONTRACT.md).
 
 ## Runtime boundary
 

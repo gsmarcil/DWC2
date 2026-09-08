@@ -10,7 +10,8 @@ archive SHA256                      d1d754076039aedf9756883f972a4f77014c043a6b7c
 pinned paths                        89
 pinned paths present/matching       89/89
 fresh-extract package VERIFY        PASS (runtime not executed)
-repository completeness gate        PASS
+baseline integrity sub-gate         PASS
+holder campaign readiness           BLOCKED / PRODUCER INCOMPATIBLE
 ```
 
 The detailed import evidence is in
@@ -33,15 +34,20 @@ regenerating `SHA256SUMS`.
 
 ## Repository gate
 
-`./VERIFY-REPOSITORY.sh` checks:
+`./VERIFY-REPOSITORY.sh` checks two independent states:
 
 1. every path in `baseline/SHA256SUMS` exists and hashes correctly;
 2. every pinned path is tracked by Git;
 3. no pinned path is excluded by `.gitignore`;
 4. the validator/freezer exposes and resolves the local `EPOCH_ARTIFACTS` contract;
-5. the canonical host and device harness source locations exist.
+5. the canonical host and device source locations exist;
+6. when `holder_merger` is active, the device source structurally exposes its
+   complete event-log contract.
 
-The gate must continue to fail closed on any future drift.
+The first four checks retain `REPOSITORY_BASELINE: PASS`. The sixth check fails
+today because the imported legacy device source lacks `--event-log` and every
+load-bearing event field. The process therefore exits nonzero without
+mislabeling the authenticated baseline as damaged or requiring re-import.
 
 ## Current evidentiary boundary
 
@@ -54,5 +60,6 @@ R3 / D_commit                        UNKNOWN
 security impact                      UNKNOWN
 ```
 
-The canonical device source is present, but its exact built harness must still
-be bound into the next expanded epoch. The historical v4.2 epoch is unchanged.
+The preserved device source is present but is not the producer required by the
+v4.2 `holder_merger`; it must not be pinned as `device_harness`. The historical
+v4.2 epoch and its verified baseline bytes remain unchanged.

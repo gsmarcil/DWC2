@@ -1,8 +1,8 @@
 # Pending work
 
-## P-1 — Bind the imported device harness to the next epoch
+## P-1 — Import the compatible holder-event producer
 
-The gadget-side source is now present at:
+The preserved legacy gadget-side source is present at:
 
 ```text
 r1a-device/r1a_ffs_out_v2.c
@@ -12,14 +12,19 @@ r1a-device/r1a_ffs_out_v2.c
 SHA256 83ea60d3566617eefc0a1b488c2916c0482781b57156d4f0d6116958f126118e
 ```
 
-Before the next expanded evidence epoch is frozen, this source, the exact built
-harness, image, and observer patch hashes must become part of the active epoch
-contract under the appropriate artifact keys.
+It is structurally incompatible with the active `holder_merger`: it has no
+`--event-log` and emits none of the required event sentinel, phase,
+`pending_reads`, `session_id`, `boot_id`, or `device_seq` fields. It must not be
+pinned as `device_harness`.
+
+Before the next expanded evidence epoch is frozen, import the original matching
+producer, prove its JSONL output round-trips through `holder_merge.py`, and pin
+its source and exact built harness with the image and observer patch.
 
 Reason: the holder witness is load-bearing for a negative R1A campaign. An epoch that names `device_harness` without preserving the source that produced the holder log is not self-contained.
 
-Source placement is closed. Expanded-epoch binding remains a provenance blocker,
-not a runtime finding.
+Legacy-source preservation is closed. Compatible-producer import and
+expanded-epoch binding remain provenance blockers, not runtime findings.
 
 ## P0 — Real hardware qualification
 
