@@ -138,7 +138,7 @@ unmap_seq
 | `ep_disable`, `EPENA=0` | no stop call | L2.5 candidate; prior ownership required |
 | `core_init_disconnected`, EP0 | kill precedes core reset/EP disable | L2.5 SURVIVOR |
 | `dwc2_hsotg_disconnect` | no stop/disable before kill | **PRIMARY-A** |
-| DDMA-isoc `ep_dequeue`, descriptor-published request | no descriptor retirement before U; stop decision passes through null-derived member-address expression | **PRIMARY-B, source-qualified; OBJECT_GATE still required for the silent-skip execution claim** |
+| DDMA-isoc `ep_dequeue`, descriptor-published request | no descriptor retirement before U; stop decision passes through null-derived member-address expression | **PRIMARY-B; source-qualified, codegen PATTERN-PROVEN, target object pending** |
 
 ## PRIMARY-A — bus-reset / disconnect ordering
 
@@ -243,9 +243,9 @@ B = SOURCE-PROVEN
 no software descriptor retirement / rewrite on the dequeue -> U path
 ```
 
-### Enabler — zero-offset embedded request, with object boundary preserved
+### Enabler — zero-offset embedded request
 
-`struct dwc2_hsotg_req` has `struct usb_request req` as its first member, so:
+`struct dwc2_hsotg_req` has `struct usb_request req` as its first member:
 
 ```text
 offsetof(struct dwc2_hsotg_req, req) == 0
@@ -261,47 +261,73 @@ if (req == &hs_ep->req->req)
     dwc2_hsotg_ep_stop_xfr(...);
 ```
 
-When `hs_ep->req == NULL`, this is a null-derived member-address expression. The
-zero member offset explains why common target code generation can reduce the
-comparison to a NULL/address comparison with no memory load. However, source-level
-C alone does not prove that concrete code generation, because the expression lies
-across a C undefined-behavior boundary.
-
-Therefore the practical statement:
+The practical silent-skip lowering has now been characterized on a layout-matched
+control build:
 
 ```text
-NULL hs_ep->req -> comparison false -> stop silently skipped
+architecture  x86-64
+compiler      gcc 13.3
+optimization  -O2
+result        load hs_ep->req value -> compare directly to req -> conditional stop branch
+              no read through the loaded pointer before comparison
 ```
 
-remains gated on the exact campaign object/disassembly.
+The same lowering was observed with and without `-fdelete-null-pointer-checks`.
+The pinned kernel build itself adds `-fno-delete-null-pointer-checks`, but that flag
+is not treated as the carrier of the pattern.
+
+Frozen classification:
 
 ```text
-OBJECT_GATE PASS
-  generated ep_dequeue code performs no faulting member load and reaches
-  complete_request/U with the stop skipped in this DDMA-isoc state
-
-OBJECT_GATE FAIL
-  generated code invalidates that execution model
+zero-offset enabler             SOURCE-PROVEN
+silent-skip codegen pattern     PATTERN-PROVEN
+  scope                         x86-64 / gcc 13.3 / -O2 reproducer
+exact named-target object       PENDING_OBJECT_GATE
 ```
+
+Target closure remains two-sided and pre-registered:
+
+```text
+OBJECT-PROVEN
+  load hs_ep->req
+  -> compare pointer value with req
+  -> conditional branch retained
+  -> no read through hs_ep->req before comparison
+  -> NULL path skips stop and reaches complete_request/U
+
+KILLED
+  read through hs_ep->req before comparison
+  OR comparison folded to a constant that invalidates the model
+  OR stop sequence executes unconditionally on the NULL path
+```
+
+For LTO builds, only the final linked `vmlinux` or final module is admissible;
+pre-link `gadget.o` is not. Non-LTO may close on `gadget.o`. The target build must
+carry debug/source mapping and be inspected with source-interleaved disassembly.
+
+Do not require a literal call to `dwc2_hsotg_ep_stop_xfr()`: it is static and may
+be inlined. The adjudicator must recognize the equivalent inlined SNAK/SGOUTNAK,
+EPDIS, and wait sequence.
 
 ### PRIMARY-B status
 
 ```text
 DDMA_ISOC_DEQUEUE_PROGRAMMED
-mapping                              SOURCE-PROVEN
-descriptor HREADY publication        SOURCE-PROVEN
-ring publication + EPENA             SOURCE-PROVEN
-A: software leaves descriptor live   SOURCE-PROVEN
-B: no retirement/rewrite around U    SOURCE-PROVEN
-offsetof(req) == 0                    SOURCE-PROVEN
-silent skip-stop execution            OBJECT_GATE
-hardware ownership/fetchability at U UNKNOWN / K_hw
-post-U DMA                            NOT PROVEN
+mapping                               SOURCE-PROVEN
+descriptor HREADY publication         SOURCE-PROVEN
+ring publication + EPENA              SOURCE-PROVEN
+A: software leaves descriptor live    SOURCE-PROVEN
+B: no retirement/rewrite around U     SOURCE-PROVEN
+offsetof(req) == 0                     SOURCE-PROVEN
+silent skip-stop pattern               PATTERN-PROVEN (x86-64/gcc13.3/-O2)
+exact target silent skip-stop          PENDING_OBJECT_GATE
+hardware ownership/fetchability at U   UNKNOWN / K_hw
+post-U DMA                             NOT PROVEN
 ```
 
-PRIMARY-B is therefore **source-qualified** and is the second primary campaign
-branch, but the exact silent-skip execution claim must not be promoted until the
-object gate passes.
+PRIMARY-B is therefore source-qualified with a pattern-level codegen result, but
+the exact silent-skip execution claim must not be promoted until the named-target
+object gate reaches `OBJECT-PROVEN` or `KILLED`.
 
 ## Independent identity-risk entry — DDMA descriptor/queue drift
 
@@ -321,9 +347,9 @@ Status:
 
 ```text
 DDMA_DESC_QUEUE_IDENTITY_DRIFT
-source asymmetry       SOURCE-PROVEN
+source asymmetry        SOURCE-PROVEN
 concrete misassociation REACHABILITY NOT YET PROVEN
-security impact        UNKNOWN
+security impact         UNKNOWN
 ```
 
 G4 must not infer `same_mapping_identity` from queue position or `compl_desc`
@@ -369,7 +395,8 @@ L2.5 PRIMARY-A                reset/disconnect, g_dma=1 g_dma_desc=0
 L2.5 PRIMARY-B                DDMA-isoc dequeue, g_dma_desc=1/isoc
   A                           SOURCE-PROVEN
   B                           SOURCE-PROVEN
-  silent skip-stop            OBJECT_GATE
+  silent-skip pattern         PATTERN-PROVEN (x86-64/gcc13.3/-O2)
+  target object               PENDING_OBJECT_GATE
   K_hw                        OPEN
 
 identity-drift side entry     SOURCE ASYMMETRY PROVEN; reachability open
