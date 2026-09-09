@@ -4,13 +4,13 @@
 
 G2.5 answers two distinct questions without conflating them:
 
-1. Is a named DWC2 target fundamentally capable of exercising the R2 path?
+1. Is a named DWC2 target fundamentally capable of exercising the selected R2 path?
 2. Is the current rig/tooling ready to observe that target with admissible identity?
 
 A board must not be rejected merely because a convenience witness (`u_ether`) or a
 particular observer has not yet been built.
 
-The qualification order is frozen as follows.
+The qualification order is frozen as follows:
 
 ```text
 A. BOARD_CAPABLE
@@ -24,6 +24,27 @@ D. CONVENIENCE / RANKING ONLY
 `NET_IP_ALIGN` and the stock `u_ether` bounce path belong to D. They are never an
 initial board-admission predicate.
 
+## Campaign split — no evidence inheritance
+
+L2 now has two primary source survivors that require different DWC2 modes. They are
+separate campaigns and must not inherit runtime evidence from one another.
+
+```text
+PRIMARY-A — reset/disconnect ordering
+    g_dma      = 1
+    g_dma_desc = 0
+    mode       = address DMA
+
+PRIMARY-B — DDMA isochronous dequeue
+    g_dma      = 1
+    g_dma_desc = 1
+    endpoint   = isochronous
+    chain_started = required
+```
+
+A board may qualify for A, B, or both. G2.5 records eligibility per campaign, not
+as one global boolean that silently transfers evidence between modes.
+
 ## A — BOARD_CAPABLE
 
 Immutable/controller capability fields:
@@ -34,32 +55,35 @@ soc
 udc_name
 udc_driver                     = dwc2
 peripheral_gadget_mode         = reachable | unreachable
-address_dma_mode               = reachable | unreachable
-expected_dwc2_params           = g_dma=1, g_dma_desc=0
-reset_disconnect_path          = reachable | unreachable
+
+primary_a_address_dma          = reachable | unreachable
+primary_a_expected_params      = g_dma=1, g_dma_desc=0
+primary_a_reset_path           = reachable | unreachable
+
+primary_b_ddma                 = reachable | unreachable
+primary_b_expected_params      = g_dma=1, g_dma_desc=1
+primary_b_isoc_endpoint        = reachable | unreachable
+primary_b_chain_start          = reachable | unreachable
 ```
 
-For this track the preferred mode is DWC2 address DMA, not DDMA. At the pinned
-Linux source, `g_dma` and `g_dma_desc` are DWC2 core parameters; the intended
-address-DMA configuration is `g_dma=1` with `g_dma_desc=0`.
-
-A board that cannot expose this mode is not accepted merely because it offers a
-convenient canary allocation.
+A board is not rejected merely because only one campaign mode is available. The
+selected campaign determines which capability predicate must be satisfied.
 
 ## B — RIG_BASE_READY
 
-Operator/rig prerequisites are recorded separately from board capability:
+Repairable operator/rig prerequisites are recorded separately:
 
 ```text
 kernel_control                 = yes | no
 dtb_control                    = yes | no
-host_bus_reset_trigger         = yes | no
+host_bus_reset_trigger         = yes | no        # required by PRIMARY-A
+isoc_host_stimulus             = yes | no        # required by PRIMARY-B
 observer_build_control         = yes | no
+object_disassembly_available   = yes | no        # required to close PRIMARY-B silent-skip gate
 ```
 
-These are repairable rig properties and therefore do not redefine
-`BOARD_CAPABLE`. They do, however, have to be satisfied before the named target is
-usable for the planned R2 campaign.
+These do not redefine immutable `BOARD_CAPABLE`, but must be satisfied before the
+corresponding campaign target is usable.
 
 ## C — DMA_TOPOLOGY_RESOLVED
 
@@ -75,18 +99,27 @@ driver_local_bounce            = yes | no
 The ordering matters:
 
 - `dma_path=bounce(SWIOTLB)` can redirect a late device write into the bounce
-  allocation rather than the intended canary object. A clean canary in that case
-  is not evidence of no late DMA.
+  allocation rather than the intended canary object. A clean canary is then not
+  evidence of no late DMA.
 - On a non-coherent platform, cache maintenance at `U` can hide, delay, or create
-  CPU-visible state transitions. Canary interpretation is not admissible until
-  that behavior is classified.
-- A DWC2-local bounce buffer likewise changes the object actually mapped to the
-  controller and must be carried in mapping identity.
+  CPU-visible state transitions. Canary interpretation is inadmissible until that
+  behavior is classified.
+- A DWC2-local bounce buffer changes the object actually mapped to the controller
+  and must be carried in mapping identity.
 
-Only after A, B, and C are satisfied is the board promoted to:
+Promotion is per campaign:
 
 ```text
-R2_ELIGIBLE_TARGET = yes
+PRIMARY_A_R2_ELIGIBLE =
+    board supports address DMA/reset path
+    && corresponding rig prerequisites ready
+    && DMA topology resolved
+
+PRIMARY_B_R2_ELIGIBLE =
+    board supports DDMA + isoc + chain start
+    && corresponding rig prerequisites ready
+    && DMA topology resolved
+    && exact object/disassembly gate available
 ```
 
 ## D — convenience / witness ranking
@@ -103,11 +136,11 @@ stock_u_ether_canary_shortcut  = yes | no
 custom_gadget_canary_feasible  = yes | no
 ```
 
-`net_ip_align_nonzero` is deliberately not used: DWC2's local unaligned-buffer
-predicate is `(long)req_buf & 3`, so a non-zero alignment value that is still a
-multiple of four does not activate the bounce path.
+`net_ip_align_nonzero` is deliberately not used: DWC2 tests `(long)req_buf & 3`,
+so a non-zero alignment value that is still a multiple of four does not activate
+the local bounce path.
 
-For the stock `u_ether` RX shortcut, source reachability requires:
+For the stock `u_ether` RX shortcut:
 
 ```text
 ((effective_NET_IP_ALIGN & 3) != 0)
@@ -119,10 +152,10 @@ For the stock `u_ether` RX shortcut, source reachability requires:
 `dev->no_skb_reserve` is false. That value originates from the gadget/UDC
 `quirk_avoids_skb_reserve` policy. The pinned DWC2 source audit found no DWC2
 assignment of `quirk_avoids_skb_reserve` (nor `quirk_ep_out_aligned_size`) in
-`gadget.c`, `core.h`, or `params.c`; nevertheless the field remains explicit in
-the matrix because it is a UDC property, not an architecture property.
+`gadget.c`, `core.h`, or `params.c`; the field remains explicit because it is a UDC
+property, not an architecture property.
 
-### Critical non-implication
+Critical non-implication:
 
 ```text
 stock_u_ether_canary_shortcut = no
@@ -130,9 +163,9 @@ stock_u_ether_canary_shortcut = no
 G6 = BLOCKED
 ```
 
-The stock `u_ether` path is only a convenience witness. G6 can still use a
-new-epoch custom gadget function that owns and identities its own DMA buffer,
-subject to the frozen epoch/provenance rules.
+The stock path is only a convenience witness. G6 may use a new-epoch custom gadget
+function that owns and identities its own DMA buffer, subject to frozen provenance
+rules.
 
 ## `u_ether` architecture filter
 
@@ -143,11 +176,7 @@ commit: f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
 u_ether.c sha256: b2f84b7b9a97a3dd46b27114d24ab3755af7182999dcf0e37a97d8ec4fba45e4
 ```
 
-`u_ether` RX allocates an skb with extra `NET_IP_ALIGN`, conditionally executes
-`skb_reserve(skb, NET_IP_ALIGN)`, then assigns `req->buf = skb->data` before
-`usb_ep_queue()`.
-
-The generic networking fallback is:
+The generic fallback is:
 
 ```c
 #ifndef NET_IP_ALIGN
@@ -155,7 +184,7 @@ The generic networking fallback is:
 #endif
 ```
 
-Verified architecture values at the same pin:
+Verified source values:
 
 | Kernel architecture | Effective value known from source | Stock u_ether offset candidate |
 |---|---:|---|
@@ -163,35 +192,29 @@ Verified architecture values at the same pin:
 | x86 | `0` | DEAD |
 | arm32 | no definition in `arch/arm/include/asm/processor.h`; generic fallback is `2` | `PENDING_PREPROCESSOR_CONFIRM` |
 
-The arm32 row is deliberately not promoted to `yes`. The fallback is guarded by
-`#ifndef`, so an earlier target/build header can override it. The exact target
-kernel configuration must be preprocessed/compiled and the effective value stored
-as a build artifact.
-
-This table ranks already-qualified boards; it does not qualify them.
+The ARM32 row is not promoted until the exact target kernel build is preprocessed
+or compiled and the effective value is retained as a build artifact. This table
+ranks qualified boards; it does not qualify them.
 
 ## FunctionFS filter
 
 Standard FunctionFS is not a route to DWC2's local unaligned-buffer bounce:
 non-SG I/O gives DWC2 a kernel `kmalloc` buffer and SG I/O sets `req->buf=NULL`.
-Therefore:
 
 ```text
 FunctionFS -> DWC2 unaligned bounce = DEAD
 ```
 
-This does not affect FunctionFS as a holder/request-generation mechanism for the
-primary reset/disconnect ordering witness; it only kills the proposed unaligned
-buffer witness.
+This only kills that convenience witness; it does not block FunctionFS as a holder
+mechanism for PRIMARY-A and does not block a custom G6 canary.
 
 ## Canary feasibility
 
-`canary_feasible` is derived only after the topology fields are known. It is not a
-raw property of the board.
+`canary_feasible` is derived only after topology is known:
 
 ```text
 canary_feasible =
-    R2_ELIGIBLE_TARGET
+    selected_campaign_R2_ELIGIBLE
     && mapping identity can be preserved/proven
     && observer semantics are valid for dma_path/coherency
     && (stock_u_ether_canary_shortcut || custom_gadget_canary_feasible)
@@ -203,11 +226,11 @@ For a no-IOMMU board, attribution additionally requires:
 commit_content_matches_host_payload = REQUIRED
 ```
 
-A generic memory change is not sufficient to attribute `D_commit` to DWC2.
+A generic memory change is insufficient to attribute `D_commit` to DWC2.
 
 ## R2/R3 implication rule
 
-R2 can also be discharged by a qualified R3 artifact:
+R2 may also be discharged by a qualified R3 artifact:
 
 ```text
 D_commit
@@ -224,16 +247,21 @@ The reverse implication is invalid:
 D_issue !=> D_commit
 ```
 
+For PRIMARY-B, G4 additionally must not infer mapping identity from DDMA queue
+position alone. The L2 side ledger records a descriptor-index / software-queue
+identity drift hazard after dequeue; runtime records must bind descriptor identity,
+request identity, mapping identity, and dequeue sequence explicitly.
+
 ## G2.5 exit
 
-Normal exit:
+Normal exit for either campaign:
 
 ```text
 at least one named target
-&& BOARD_CAPABLE
-&& RIG_BASE_READY
+&& campaign-specific BOARD_CAPABLE predicate
+&& campaign-specific RIG_BASE_READY predicate
 && DMA_TOPOLOGY_RESOLVED
-=> G2.5 PASS
+=> G2.5 PASS for that campaign
 ```
 
 If the enumerated target set is empty after those predicates:
@@ -243,9 +271,8 @@ G2.5_TARGET_SET = EMPTY
 => reorder to G3 -> G4 -> G6
 ```
 
-Canary remains the primary observation strategy and IOMMU remains optional. A
-missing stock `u_ether` shortcut is not an empty-target condition and does not
-block G6.
+Canary remains primary and IOMMU optional. Missing stock `u_ether` is not an
+empty-target condition.
 
 ## Current G2.5 status
 
@@ -258,9 +285,8 @@ source/architecture convenience filter:
 DWC2 quirk audit:
     quirk_avoids_skb_reserve assignment in audited DWC2 files  NOT OBSERVED
 
-named BOARD_CAPABLE target        NOT YET FROZEN
-RIG_BASE_READY target             NOT YET FROZEN
-DMA_TOPOLOGY_RESOLVED target      NOT YET FROZEN
-R2_ELIGIBLE_TARGET                NOT YET FROZEN
-G2.5 exit                         NOT REACHED
+PRIMARY-A named target          NOT YET FROZEN
+PRIMARY-B named target          NOT YET FROZEN
+DMA topology                    NOT YET FROZEN
+G2.5 exit                       NOT REACHED
 ```
