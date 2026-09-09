@@ -52,6 +52,94 @@
  *   cc -O2 -Wall -o r1a_ffs_out_v2 r1a_ffs_out_v2.c
  *   ./r1a_ffs_out_v2 --ffs /dev/ffs-r1a --depth 8 --seconds 30 \
  *                    --artifact batch_1.json
+ *
+ * THE HOLDER WITNESS (--event-log)
+ * --------------------------------
+ * pipeline/holder_merge.py consumes a JSONL log and pairs one
+ * {"event":"R1A_HOLDER","phase":"campaign",...} record with each host attempt,
+ * by order.  The load-bearing field is pending_reads, which the pipeline reads
+ * as "the gadget's own queue depth at teardown" and tests as >= floor.  A >=
+ * test is only sound on a LOWER bound, so what this harness counts has to be
+ * requests the function driver provably still owned when the endpoint was
+ * disabled -- not requests this process had merely not reaped yet.
+ *
+ * Three facts from the pinned tree decide the design:
+ *
+ *   drivers/usb/gadget/function/f_fs.c:3805  ffs_func_eps_disable(ffs->func);
+ *   drivers/usb/gadget/function/f_fs.c:3818  ffs_event_add(ffs, FUNCTIONFS_DISABLE);
+ *
+ *     The endpoints are torn down BEFORE the event is queued.  By the time
+ *     userspace dequeues FUNCTIONFS_DISABLE the kill has already run, so
+ *     "cur_inflight sampled at the DISABLE event" is a race artifact: it
+ *     depends on how much of the completion workqueue has already drained.
+ *     It is an upper bound, and an upper bound cannot support >= floor.
+ *
+ *   drivers/usb/dwc2/gadget.c:5259           kill_all_requests(hsotg, hs_ep, -ESHUTDOWN);
+ *   drivers/usb/gadget/function/f_fs.c:894   io_data->status = req->status ? req->status : req->actual;
+ *
+ *     dwc2_hsotg_ep_disable() completes everything still on ep->queue with
+ *     -ESHUTDOWN, and f_fs propagates req->status verbatim to the AIO result.
+ *     So an AIO read that returns -ESHUTDOWN WAS on the endpoint queue when
+ *     the kill ran.  That is the lower bound the pipeline needs.
+ *
+ *   drivers/usb/gadget/function/f_fs.c:3229  case FUNCTIONFS_DISABLE:
+ *   drivers/usb/gadget/function/f_fs.c:3234          neg = 1;
+ *
+ *     __ffs_event_add() purges every queued event except SUSPEND/RESUME when
+ *     it adds BIND/UNBIND/ENABLE/DISABLE.  A DISABLE immediately followed by an
+ *     ENABLE -- which is exactly what SET_CONFIGURATION(nonzero) produces, via
+ *     composite.c:966 reset_config() then ffs_func_set_alt() -- can therefore
+ *     erase the DISABLE before this process ever reads it.  A witness keyed
+ *     only on the DISABLE event would silently under-count in the cfgn branch.
+ *     USB_REQ_SET_INTERFACE is worse: composite.c:1915 reaches
+ *     ffs_func_set_alt() only, which nukes pending requests at f_fs.c:3775 and
+ *     emits ENABLE alone -- there is no DISABLE to key on at all.
+ *
+ * So a teardown episode here opens on EITHER the FUNCTIONFS_DISABLE event OR
+ * the first -ESHUTDOWN completion, whichever arrives first, and the record
+ * names which one opened it.  pending_reads is then exactly one term:
+ *
+ *     reads that completed -ESHUTDOWN during the episode, were not immediate
+ *     submission failures, and were submitted at or before the episode cutoff
+ *     (the submission count as it stood when the episode opened)
+ *
+ * and nothing else.  A read that completed with data is excluded, because it
+ * may have completed before the teardown and merely sat unreaped.  A read that
+ * has NOT completed is excluded too, which is the less obvious one: the driver
+ * still owns it, so it is tempting to count it, but "has not completed" is the
+ * absence of a fact rather than a fact -- the request may be held, may be lost,
+ * may never have been queued.  Those are reported as unresolved_reads, for
+ * diagnosis, and they do not raise the count.  A read killed after the cutoff
+ * is reported as kills_after_cutoff and does not raise it either.
+ *
+ * One more subtraction is needed for that to be true.  f_fs.c:1087 returns
+ * -ESHUTDOWN from ffs_epfile_io() when epfile->ep is already NULL, so a read
+ * submitted after the teardown and before this process noticed comes back with
+ * the same status as a kill without ever having been queued.  The two separate
+ * in time rather than in status: the early return happens inside io_submit(),
+ * so its completion is already in the ring when io_submit() returns and is
+ * handed back by the very next io_getevents() call, while a real kill is
+ * completed later by the ffs workqueue (f_fs.c:896).  Each slot therefore
+ * records the io_getevents() count at submission, and an -ESHUTDOWN returned
+ * by the immediately following call is recorded as sync_submit_failures and
+ * kept out of pending_reads.  A real kill that the workqueue delivers that
+ * fast is discarded with them, which makes the count too small; that direction
+ * costs a usable negative, the other direction would manufacture one.
+ *
+ * WHAT THIS DOES NOT DO.  It does not decide which teardown is the campaign.
+ * phase comes from --phase-file, is checked against a fixed vocabulary, and is
+ * "unknown" when no file is given.  This harness never writes "campaign" on its
+ * own initiative, because holder_merge.py refuses to guess an unmarked
+ * teardown and that refusal is the point.
+ *
+ * THE FIXTURE IS NOT IN THE CAMPAIGN NAMESPACE.  --selftest-holder drives the
+ * same slot table and the same writer, so the record shape it produces is the
+ * real one, but its records are written as event "R1A_HOLDER_SELFTEST" with
+ * phase "selftest".  holder_merge.py selects on event and phase and ignores
+ * every other field, so a "synthetic":true flag alone would not stop a fixture
+ * from merging to HOLDER_CONFIRMED -- it has to be outside the namespace the
+ * merger reads, and it is.  The flag remains as a second marker on the header
+ * line and on every record.
  */
 #define _GNU_SOURCE
 
@@ -97,6 +185,18 @@
 #define DEF_DEPTH	8
 #define DEF_BUFLEN	16384
 #define DEF_SECONDS	30
+
+/*
+ * How long an open teardown episode waits for further -ESHUTDOWN completions
+ * before it is closed and written out.  ffs_epfile_async_io_complete() hands
+ * the completion to a workqueue (f_fs.c:896), so the kills do not all land in
+ * the AIO ring in the same instant; closing too early would truncate the
+ * count.  The value is recorded in every record, because it is part of what
+ * the number means.
+ */
+#define DEF_SETTLE_MS	500
+#define BOOT_ID_PATH	"/proc/sys/kernel/random/boot_id"
+#define PHASE_MAX	32
 
 /* ------------------------------------------------------------ AIO syscalls */
 
@@ -216,6 +316,10 @@ struct slot {
 	struct iocb cb;
 	unsigned char *buf;
 	bool inflight;
+	/* io_getevents() call count at the moment this slot was submitted */
+	unsigned long long submit_ge;
+	/* monotonic submission number, compared against the episode cutoff */
+	unsigned long long submit_seq;
 };
 
 struct run {
@@ -226,6 +330,14 @@ struct run {
 	unsigned seconds;
 	const char *artifact;
 	const char *dump_desc;
+
+	/* holder witness configuration */
+	const char *event_log;
+	const char *session_id;
+	const char *phase_file;
+	bool log_append;
+	bool synthetic;
+	unsigned settle_ms;
 
 	/* endpoint identity, as read back from the kernel */
 	int ep_addr;
@@ -244,6 +356,35 @@ struct run {
 	unsigned peak_inflight, cur_inflight;
 	double t_first_byte, t_last_byte;
 	int last_errno;
+
+	/*
+	 * Holder witness accounting.  submitted_total and reaped_total are
+	 * monotonic for the life of the process; their difference is the
+	 * number of reads this process has handed the kernel and not yet
+	 * collected.  reaped_shutdown is the only one of the three that
+	 * carries a claim about the driver, because -ESHUTDOWN on a Bulk OUT
+	 * read can only be produced by kill_all_requests() and therefore
+	 * proves the request was on ep->queue when the kill ran.
+	 */
+	FILE *evlog;
+	unsigned long long ge_calls;
+	char boot_id[64];
+	char phase[PHASE_MAX];
+	const char *phase_source;
+	unsigned phase_change_seq;
+	unsigned device_seq;
+	unsigned long long submitted_total, reaped_total;
+	unsigned long long reaped_shutdown, reaped_ok, reaped_other_err;
+	unsigned long long reaped_sync_fail;
+
+	/* open teardown episode */
+	bool td_open;
+	const char *td_trigger;
+	unsigned long long td_cutoff;
+	unsigned long long td_kills, td_kills_after_cutoff;
+	unsigned long long td_sync_fail_at_open;
+	unsigned td_inflight_at_open;
+	double td_open_t, td_last_esd_t;
 };
 
 static volatile sig_atomic_t stop_flag;
@@ -256,6 +397,327 @@ static double now_s(void)
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+/* ------------------------------------------------------- holder witness */
+/*
+ * The vocabulary is closed on purpose.  holder_merge.py selects records with
+ * phase == "campaign" and silently drops everything else, so a phase file
+ * holding "Campaign" or "campaign\n" would not fail -- it would produce a log
+ * with fewer campaign records than the host fired attempts, which the merger
+ * then reports as a depth problem.  Rejecting the token here turns a silent
+ * miscount into a visible refusal.
+ */
+static const char *const PHASES[] = {
+	"preflight", "sensitivity", "campaign", "rearm", "unknown",
+};
+
+static bool safe_token(const char *s, size_t max)
+{
+	size_t i;
+
+	if (!s || !*s)
+		return false;
+	for (i = 0; s[i]; i++) {
+		unsigned char c = (unsigned char)s[i];
+
+		if (i >= max)
+			return false;
+		if (c < 0x20 || c > 0x7e || c == '"' || c == '\\')
+			return false;
+	}
+	return true;
+}
+
+/*
+ * Read a short file and strip trailing whitespace.  Used for the board's own
+ * boot identity and for the phase marker, both of which are single tokens.
+ */
+static int read_trimmed(const char *path, char *buf, size_t len)
+{
+	size_t n;
+	FILE *f = fopen(path, "r");
+
+	if (!f)
+		return -1;
+	n = fread(buf, 1, len - 1, f);
+	fclose(f);
+	buf[n] = '\0';
+	while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r' ||
+		     buf[n - 1] == ' ' || buf[n - 1] == '\t'))
+		buf[--n] = '\0';
+	return n ? 0 : -1;
+}
+
+static void utc_now(char *buf, size_t len)
+{
+	struct timespec ts;
+	struct tm tm;
+
+	clock_gettime(CLOCK_REALTIME, &ts);
+	if (!gmtime_r(&ts.tv_sec, &tm)) {
+		snprintf(buf, len, "1970-01-01T00:00:00Z");
+		return;
+	}
+	strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &tm);
+}
+
+static void holder_flush(struct run *r)
+{
+	if (!r->evlog)
+		return;
+	fflush(r->evlog);
+	if (fsync(fileno(r->evlog)) < 0 && errno != EINVAL)
+		fprintf(stderr, "event log fsync: %s\n", strerror(errno));
+}
+
+/*
+ * The phase is re-read at the moment a teardown episode opens, never cached
+ * from startup, so the operator can move the run from preflight to campaign
+ * without restarting the gadget side.  An unreadable or unknown token is
+ * recorded as "unknown" and the reason is kept in phase_source: the record is
+ * still written, because a teardown that happened must not vanish from the log
+ * just because its label was wrong.
+ */
+static void holder_read_phase(struct run *r)
+{
+	char buf[PHASE_MAX];
+	const char *prev = r->phase;
+	size_t i;
+
+	if (!r->phase_file) {
+		r->phase_source = "no_phase_file";
+		snprintf(buf, sizeof(buf), "unknown");
+	} else if (read_trimmed(r->phase_file, buf, sizeof(buf)) < 0) {
+		r->phase_source = "phase_file_unreadable";
+		snprintf(buf, sizeof(buf), "unknown");
+	} else {
+		r->phase_source = "phase_file";
+		for (i = 0; i < sizeof(PHASES) / sizeof(PHASES[0]); i++)
+			if (!strcmp(buf, PHASES[i]))
+				break;
+		if (i == sizeof(PHASES) / sizeof(PHASES[0])) {
+			fprintf(stderr, "phase file %s holds a token that is "
+				"not in the vocabulary; recording \"unknown\"\n",
+				r->phase_file);
+			r->phase_source = "phase_file_token_rejected";
+			snprintf(buf, sizeof(buf), "unknown");
+		}
+	}
+
+	if (strcmp(prev, buf))
+		r->phase_change_seq++;
+	snprintf(r->phase, sizeof(r->phase), "%s", buf);
+}
+
+static int holder_open(struct run *r)
+{
+	struct stat st;
+	char utc[32];
+	int fd;
+
+	if (!r->event_log)
+		return 0;
+
+	if (!safe_token(r->event_log, 255)) {
+		fprintf(stderr, "--event-log path must be a printable token "
+			"without quote or backslash\n");
+		return -1;
+	}
+	if (!r->session_id) {
+		fprintf(stderr, "--event-log requires --session-id, and it must "
+			"be the same session_id the host writes into the "
+			"manifest: holder_merge.py compares them and refuses "
+			"the merge when they differ\n");
+		return -1;
+	}
+	if (!safe_token(r->session_id, 63)) {
+		fprintf(stderr, "--session-id must be a printable token without "
+			"quote or backslash; this one would be escaped into "
+			"the JSONL and stop matching the manifest\n");
+		return -1;
+	}
+	/*
+	 * The boot identity is read from the kernel here rather than accepted
+	 * from the command line.  The host harness takes session.boot_id as an
+	 * operator argument, so the merger's equality test is only worth
+	 * something if one of the two sides is not operator-typed.
+	 */
+	if (read_trimmed(BOOT_ID_PATH, r->boot_id, sizeof(r->boot_id)) < 0 ||
+	    !safe_token(r->boot_id, sizeof(r->boot_id) - 1)) {
+		fprintf(stderr, "cannot read %s\n", BOOT_ID_PATH);
+		return -1;
+	}
+	if (stat(r->event_log, &st) == 0 && st.st_size > 0 && !r->log_append) {
+		fprintf(stderr, "%s already holds %lld bytes.  holder_merge.py "
+			"aborts the whole merge if the log carries a campaign "
+			"record from another session or boot, so a stale log is "
+			"refused now rather than after the campaign.  Use a "
+			"fresh path, or --event-log-append if this really is a "
+			"continuation of the same session.\n",
+			r->event_log, (long long)st.st_size);
+		return -1;
+	}
+
+	fd = open(r->event_log, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (fd < 0) {
+		fprintf(stderr, "open %s: %s\n", r->event_log,
+			strerror(errno));
+		return -1;
+	}
+	r->evlog = fdopen(fd, "a");
+	if (!r->evlog) {
+		fprintf(stderr, "fdopen %s: %s\n", r->event_log,
+			strerror(errno));
+		close(fd);
+		return -1;
+	}
+
+	snprintf(r->phase, sizeof(r->phase), "unknown");
+	r->phase_source = "not_read_yet";
+	utc_now(utc, sizeof(utc));
+	/*
+	 * holder_merge.py keeps only event == "R1A_HOLDER", so this header is
+	 * inert to the merger and visible to a reader.  It is the only place
+	 * the synthetic marker can be seen without reading every record.
+	 */
+	fprintf(r->evlog,
+		"{\"event\":\"R1A_HOLDER_SESSION\",\"phase\":\"session\","
+		"\"session_id\":\"%s\",\"boot_id\":\"%s\",\"utc\":\"%s\","
+		"\"harness\":\"r1a_ffs_out_v2\","
+		"\"mode\":\"%s\",\"synthetic\":%s,"
+		"\"depth_configured\":%u,\"buflen\":%u,\"settle_ms\":%u}\n",
+		r->session_id, r->boot_id, utc,
+		r->synthetic ? "selftest_holder" : "run",
+		r->synthetic ? "true" : "false",
+		r->depth, r->buflen, r->settle_ms);
+	holder_flush(r);
+	printf("  holder event log: %s (session_id=%s boot_id=%s)\n",
+	       r->event_log, r->session_id, r->boot_id);
+	return 0;
+}
+
+static void teardown_open(struct run *r, const char *trigger)
+{
+	if (!r->evlog || r->td_open)
+		return;
+	r->td_open = true;
+	r->td_trigger = trigger;
+	r->td_sync_fail_at_open = r->reaped_sync_fail;
+	/*
+	 * The cutoff is the submission count as it stood when the episode
+	 * opened.  A read submitted after it cannot have been on the queue the
+	 * teardown emptied, whatever status it later returns.
+	 */
+	r->td_cutoff = r->submitted_total;
+	r->td_kills = 0;
+	r->td_kills_after_cutoff = 0;
+	r->td_inflight_at_open =
+		(unsigned)(r->submitted_total - r->reaped_total);
+	r->td_open_t = now_s();
+	r->td_last_esd_t = r->td_open_t;
+	holder_read_phase(r);
+}
+
+/*
+ * pending_reads counts ONE thing: reads that came back -ESHUTDOWN inside this
+ * episode, were not immediate submission failures, and were submitted at or
+ * before the episode cutoff.  Only kill_all_requests() produces that status
+ * for a Bulk OUT read (dwc2/gadget.c:5259, propagated verbatim at
+ * f_fs.c:894), so each one was on the endpoint queue when the endpoint was
+ * disabled.  Nothing else is added.
+ *
+ * In particular a read that has NOT completed is not counted.  It was tempting
+ * -- the driver still holds it, so it held it then -- but "has not completed"
+ * is not a fact about the queue, it is the absence of one: the request may be
+ * held, may be lost, may never have been queued.  Such reads are reported as
+ * unresolved_reads so a run that stalls is diagnosable, and they leave
+ * pending_reads alone.
+ *
+ * A read that completed with data is excluded too: it may have completed
+ * before the teardown and merely sat unreaped.
+ *
+ * Every exclusion pushes the number down.  A count that is too small costs a
+ * usable negative; a count that is too large would manufacture one.
+ */
+static void teardown_close(struct run *r, const struct slot *slots)
+{
+	unsigned long long pending, unresolved = 0;
+	char utc[32];
+	unsigned i;
+
+	if (!r->evlog || !r->td_open)
+		return;
+
+	if (slots)
+		for (i = 0; i < r->depth; i++)
+			if (slots[i].inflight &&
+			    slots[i].submit_seq <= r->td_cutoff)
+				unresolved++;
+
+	pending = r->td_kills;
+	r->device_seq++;
+	utc_now(utc, sizeof(utc));
+
+	/*
+	 * A fixture is written OUTSIDE the campaign namespace, not merely
+	 * labelled.  holder_merge.py selects on event and phase and ignores
+	 * every other field, so "synthetic":true alone would not stop a
+	 * fixture from merging to HOLDER_CONFIRMED.  These records are dropped
+	 * by the merger's own filter, and the flag stays as a second marker.
+	 */
+	fprintf(r->evlog,
+		"{\"event\":\"%s\",\"phase\":\"%s\","
+		"\"session_id\":\"%s\",\"boot_id\":\"%s\","
+		"\"device_seq\":%u,\"pending_reads\":%llu,\"utc\":\"%s\","
+		"\"synthetic\":%s,"
+		"\"pending_definition\":\"eshutdown_kills_at_or_before_"
+		"cutoff_excluding_sync_submit_failures\","
+		"\"unresolved_reads\":%llu,"
+		"\"kills_after_cutoff\":%llu,"
+		"\"sync_submit_failures\":%llu,"
+		"\"episode_cutoff\":%llu,"
+		"\"inflight_at_open\":%u,\"depth_configured\":%u,"
+		"\"episode_trigger\":\"%s\",\"phase_marker\":\"%s\","
+		"\"phase_source\":\"%s\","
+		"\"phase_change_seq\":%u,\"settle_ms\":%u,"
+		"\"open_to_close_s\":%.6f,"
+		"\"submitted_total\":%llu,\"reaped_total\":%llu,"
+		"\"reaped_shutdown_total\":%llu,"
+		"\"reaped_ok\":%llu,\"reaped_other_err\":%llu}\n",
+		r->synthetic ? "R1A_HOLDER_SELFTEST" : "R1A_HOLDER",
+		r->synthetic ? "selftest" : r->phase,
+		r->session_id, r->boot_id,
+		r->device_seq, pending, utc,
+		r->synthetic ? "true" : "false",
+		unresolved,
+		r->td_kills_after_cutoff,
+		r->reaped_sync_fail - r->td_sync_fail_at_open,
+		r->td_cutoff,
+		r->td_inflight_at_open, r->depth,
+		r->td_trigger, r->phase, r->phase_source,
+		r->phase_change_seq, r->settle_ms,
+		now_s() - r->td_open_t,
+		r->submitted_total, r->reaped_total, r->reaped_shutdown,
+		r->reaped_ok, r->reaped_other_err);
+	holder_flush(r);
+
+	printf("  [holder] seq=%u phase=%s pending_reads=%llu "
+	       "(unresolved=%llu after_cutoff=%llu) trigger=%s\n",
+	       r->device_seq, r->synthetic ? "selftest" : r->phase, pending,
+	       unresolved, r->td_kills_after_cutoff, r->td_trigger);
+
+	r->td_open = false;
+	r->td_trigger = NULL;
+}
+
+static void holder_close(struct run *r)
+{
+	if (!r->evlog)
+		return;
+	holder_flush(r);
+	fclose(r->evlog);
+	r->evlog = NULL;
 }
 
 static const char *xfer_name(int a)
@@ -354,6 +816,7 @@ static void handle_ep0(int ep0, struct run *r)
 		r->n_disable++;
 		r->t_disable = now_s();
 		printf("  [ep0] DISABLE (ready=0)  <-- R1 window opens\n");
+		teardown_open(r, "functionfs_disable");
 		break;
 	case FUNCTIONFS_SETUP:
 		r->n_setup++;
@@ -399,6 +862,9 @@ static int submit_slot(aio_context_t ctx, struct slot *s, int epfd, int evfd,
 		return -1;
 	}
 	s->inflight = true;
+	s->submit_ge = r->ge_calls;
+	r->submitted_total++;
+	s->submit_seq = r->submitted_total;
 	r->cur_inflight++;
 	if (r->cur_inflight > r->peak_inflight)
 		r->peak_inflight = r->cur_inflight;
@@ -413,6 +879,10 @@ static void drain(aio_context_t ctx, struct slot *slots, int epfd, int evfd,
 	long n, i;
 
 	for (;;) {
+		unsigned long long ge;
+
+		r->ge_calls++;
+		ge = r->ge_calls;
 		n = sys_io_getevents(ctx, 0, r->depth, ev, &zero);
 		if (n <= 0)
 			return;
@@ -421,13 +891,21 @@ static void drain(aio_context_t ctx, struct slot *slots, int epfd, int evfd,
 			unsigned idx = (unsigned)ev[i].data;
 			long res = (long)ev[i].res;
 			double t = now_s();
+			bool first_ge;
 
 			if (idx >= r->depth)
 				continue;
+			/*
+			 * True when this is the first io_getevents() call after
+			 * the slot was submitted, which is where a synchronous
+			 * ffs_epfile_io() failure always lands.
+			 */
+			first_ge = slots[idx].submit_ge + 1 == ge;
 			slots[idx].inflight = false;
 			if (r->cur_inflight)
 				r->cur_inflight--;
 			r->completions++;
+			r->reaped_total++;
 
 			if (res > 0) {
 				r->bytes += (unsigned long long)res;
@@ -440,11 +918,59 @@ static void drain(aio_context_t ctx, struct slot *slots, int epfd, int evfd,
 				r->errors++;
 				r->last_errno = (int)-res;
 			}
+			/*
+			 * -ESHUTDOWN is the teardown signature.  For a Bulk
+			 * OUT read it can only come from kill_all_requests()
+			 * (dwc2/gadget.c:5259 on ep_disable, :4294/:4297 on
+			 * disconnect), and f_fs.c:894 hands req->status
+			 * through unchanged, so this read was on ep->queue
+			 * when the kill ran.  It also opens an episode by
+			 * itself: f_fs.c:3229 lets a following ENABLE purge a
+			 * DISABLE that has not been read yet, and
+			 * ffs_func_set_alt() nukes requests without ever
+			 * queueing a DISABLE, so the event cannot be relied on
+			 * as the only opener.
+			 */
+			if (res == -ESHUTDOWN && first_ge) {
+				/*
+				 * Returned by io_submit() itself: the endpoint
+				 * file had no endpoint, so nothing was ever
+				 * queued.  It is not evidence of a held
+				 * request and is kept out of pending_reads.
+				 */
+				r->reaped_sync_fail++;
+			} else if (res == -ESHUTDOWN) {
+				r->reaped_shutdown++;
+				teardown_open(r,
+					"shutdown_completion_"
+					"without_disable_event");
+				/*
+				 * A read submitted after the cutoff was not on
+				 * the queue the teardown emptied.  It is
+				 * recorded separately and never counted.
+				 */
+				if (slots[idx].submit_seq <= r->td_cutoff)
+					r->td_kills++;
+				else
+					r->td_kills_after_cutoff++;
+				r->td_last_esd_t = t;
+			} else if (res < 0) {
+				r->reaped_other_err++;
+			} else {
+				r->reaped_ok++;
+			}
+
 			if (r->n_disable && t >= r->t_disable)
 				r->post_disable_completions++;
 
-			/* keep the pipe full while the function is enabled */
-			if (r->ready && !stop_flag)
+			/*
+			 * Keep the pipe full while the function is enabled,
+			 * but never inside an open teardown episode: the
+			 * endpoint is down, and a refill would add reads to a
+			 * count whose whole meaning is the queue as it stood
+			 * at the kill.
+			 */
+			if (r->ready && !stop_flag && !r->td_open)
 				submit_slot(ctx, &slots[idx], epfd, evfd,
 					    r->buflen, idx, r);
 		}
@@ -594,6 +1120,104 @@ out:
 	return rc;
 }
 
+/* ------------------------------------------------- holder format self-test */
+/*
+ * SCOPE, stated plainly: this writes a real event log through the real
+ * emitter, so it demonstrates that the record shape round-trips through
+ * pipeline/holder_merge.py.  It demonstrates NOTHING about queue depth on a
+ * board -- the counters are driven from this function, not from an endpoint.
+ * Every record it writes, and the log header, carry "synthetic":true so a
+ * fixture can never be mistaken for a campaign artifact.
+ */
+static int selftest_holder(struct run *r, unsigned n)
+{
+	struct slot *slots;
+	unsigned i, j, kills;
+
+	if (!r->event_log || !r->session_id) {
+		fprintf(stderr, "--selftest-holder needs --event-log and "
+			"--session-id\n");
+		return 2;
+	}
+	if (r->depth < 2) {
+		fprintf(stderr, "--selftest-holder needs --depth >= 2\n");
+		return 2;
+	}
+	r->synthetic = true;
+	if (holder_open(r) < 0)
+		return 2;
+
+	slots = calloc(r->depth, sizeof(*slots));
+	if (!slots) {
+		perror("calloc");
+		holder_close(r);
+		return 2;
+	}
+
+	/*
+	 * The fixture drives the same slot table and the same close path the
+	 * real run uses, so the counting rules are exercised rather than
+	 * described.  Each round deliberately produces all three cases:
+	 *
+	 *   depth-1 reads killed at or before the cutoff   -> counted
+	 *   1 read left unresolved, submitted before it    -> NOT counted
+	 *   1 re-armed read killed after the cutoff        -> NOT counted
+	 *
+	 * The mid-episode re-arm is what a DISABLE/ENABLE pair produces
+	 * (composite.c:966), and it is the ordering a close that counted fresh
+	 * submissions would get wrong.
+	 */
+	kills = r->depth - 1;
+	for (i = 0; i < r->depth; i++) {
+		slots[i].inflight = true;
+		r->submitted_total++;
+		slots[i].submit_seq = r->submitted_total;
+	}
+
+	for (i = 0; i < n; i++) {
+		teardown_open(r, "functionfs_disable");
+
+		for (j = 0; j < kills; j++) {
+			slots[j].inflight = false;
+			r->reaped_total++;
+			r->reaped_shutdown++;
+			if (slots[j].submit_seq <= r->td_cutoff)
+				r->td_kills++;
+			else
+				r->td_kills_after_cutoff++;
+		}
+
+		for (j = 0; j < kills; j++) {
+			slots[j].inflight = true;
+			r->submitted_total++;
+			slots[j].submit_seq = r->submitted_total;
+		}
+
+		/* one of the re-armed reads is killed after the cutoff */
+		slots[0].inflight = false;
+		r->reaped_total++;
+		r->reaped_shutdown++;
+		if (slots[0].submit_seq <= r->td_cutoff)
+			r->td_kills++;
+		else
+			r->td_kills_after_cutoff++;
+		slots[0].inflight = true;
+		r->submitted_total++;
+		slots[0].submit_seq = r->submitted_total;
+
+		teardown_close(r, slots);
+	}
+
+	free(slots);
+	holder_close(r);
+	printf("HOLDER FORMAT SELFTEST: wrote %u synthetic episode(s) to %s\n",
+	       n, r->event_log);
+	printf("  event=R1A_HOLDER_SELFTEST phase=selftest -- outside the\n"
+	       "  campaign namespace, so holder_merge.py drops these records.\n"
+	       "  a format fixture, not a measurement\n");
+	return 0;
+}
+
 /* --------------------------------------------------------------- artifact */
 
 static void write_artifact(const struct run *r)
@@ -682,6 +1306,35 @@ static void write_artifact(const struct run *r)
 		(r->peak_inflight < 2)      ? "INVALID_NO_QUEUE_DEPTH" :
 		(r->peak_inflight < r->depth) ? "WEAK_DEPTH_BELOW_TARGET" :
 					      "SENSITIVE");
+	fprintf(f, "  },\n");
+
+	/*
+	 * The same totals the event log records, in the one-shot summary, so a
+	 * log and an artifact from the same run can be checked against each
+	 * other without trusting either alone.
+	 */
+	fprintf(f, "  \"holder\": {\n");
+	if (r->event_log)
+		fprintf(f, "    \"event_log\": \"%s\",\n", r->event_log);
+	else
+		fprintf(f, "    \"event_log\": null,\n");
+	if (r->session_id)
+		fprintf(f, "    \"session_id\": \"%s\",\n", r->session_id);
+	else
+		fprintf(f, "    \"session_id\": null,\n");
+	fprintf(f, "    \"boot_id\": \"%s\",\n", r->boot_id);
+	fprintf(f, "    \"synthetic\": %s,\n",
+		r->synthetic ? "true" : "false");
+	fprintf(f, "    \"records_written\": %u,\n", r->device_seq);
+	fprintf(f, "    \"submitted_total\": %llu,\n", r->submitted_total);
+	fprintf(f, "    \"reaped_total\": %llu,\n", r->reaped_total);
+	fprintf(f, "    \"reaped_shutdown\": %llu,\n", r->reaped_shutdown);
+	fprintf(f, "    \"reaped_ok\": %llu,\n", r->reaped_ok);
+	fprintf(f, "    \"reaped_other_err\": %llu,\n",
+		r->reaped_other_err);
+	fprintf(f, "    \"reaped_sync_fail\": %llu,\n",
+		r->reaped_sync_fail);
+	fprintf(f, "    \"settle_ms\": %u\n", r->settle_ms);
 	fprintf(f, "  }\n");
 	fprintf(f, "}\n");
 	fclose(f);
@@ -695,8 +1348,22 @@ static void usage(const char *p)
 	fprintf(stderr,
 		"usage: %s --ffs DIR [--depth N] [--buflen N] [--seconds N]\n"
 		"          [--artifact PATH] [--dump-desc PATH]\n"
+		"          [--event-log PATH --session-id ID"
+		" [--phase-file PATH]\n"
+		"           [--settle-ms N] [--event-log-append]]\n"
 		"       %s --selftest-aio [--depth N] [--buflen N]\n"
-		"  DIR must be an already-mounted functionfs instance.\n", p, p);
+		"       %s --selftest-holder N --event-log PATH"
+		" --session-id ID\n"
+		"  DIR must be an already-mounted functionfs instance.\n"
+		"  --event-log writes the holder witness JSONL that\n"
+		"  pipeline/holder_merge.py consumes.  --session-id must equal\n"
+		"  the session_id in the host manifest; boot_id is read from\n"
+		"  " BOOT_ID_PATH " and is never taken from the command line.\n"
+		"  --phase-file holds exactly one of: preflight sensitivity\n"
+		"  campaign rearm unknown.  Without it every record is\n"
+		"  \"unknown\" and the merger finds no campaign events, which\n"
+		"  is the intended default: this harness does not decide which\n"
+		"  teardown was the campaign.\n", p, p, p);
 }
 
 int main(int argc, char **argv)
@@ -709,6 +1376,7 @@ int main(int argc, char **argv)
 	struct pollfd pfd[2];
 	unsigned i;
 	double deadline;
+	unsigned holder_selftest = 0;
 	bool submitted = false;
 	bool selftest = false;
 
@@ -716,6 +1384,8 @@ int main(int argc, char **argv)
 	r.depth = DEF_DEPTH;
 	r.buflen = DEF_BUFLEN;
 	r.seconds = DEF_SECONDS;
+	r.settle_ms = DEF_SETTLE_MS;
+	r.phase_source = "not_read_yet";
 
 	for (i = 1; i < (unsigned)argc; i++) {
 		if (!strcmp(argv[i], "--ffs") && i + 1 < (unsigned)argc)
@@ -730,6 +1400,18 @@ int main(int argc, char **argv)
 			r.artifact = argv[++i];
 		else if (!strcmp(argv[i], "--dump-desc") && i + 1 < (unsigned)argc)
 			r.dump_desc = argv[++i];
+		else if (!strcmp(argv[i], "--event-log") && i + 1 < (unsigned)argc)
+			r.event_log = argv[++i];
+		else if (!strcmp(argv[i], "--session-id") && i + 1 < (unsigned)argc)
+			r.session_id = argv[++i];
+		else if (!strcmp(argv[i], "--phase-file") && i + 1 < (unsigned)argc)
+			r.phase_file = argv[++i];
+		else if (!strcmp(argv[i], "--settle-ms") && i + 1 < (unsigned)argc)
+			r.settle_ms = (unsigned)atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--event-log-append"))
+			r.log_append = true;
+		else if (!strcmp(argv[i], "--selftest-holder") && i + 1 < (unsigned)argc)
+			holder_selftest = (unsigned)atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--selftest-aio"))
 			selftest = true;
 		else {
@@ -744,6 +1426,9 @@ int main(int argc, char **argv)
 
 	if (selftest)
 		return selftest_aio(r.depth, r.buflen);
+
+	if (holder_selftest)
+		return selftest_holder(&r, holder_selftest);
 
 	/*
 	 * --dump-desc writes the exact bytes this binary would hand to ep0, so
@@ -784,6 +1469,16 @@ int main(int argc, char **argv)
 
 	printf("r1a_ffs_out_v2  ffs=%s depth=%u buflen=%u seconds=%u\n",
 	       r.ffs_dir, r.depth, r.buflen, r.seconds);
+
+	/*
+	 * Open the log before touching the gadget.  A stale log, a missing
+	 * session id or an unreadable boot id must stop the run while nothing
+	 * has happened yet, not after a campaign that cannot be merged.
+	 */
+	if (holder_open(&r) < 0) {
+		rc = 2;
+		goto out;
+	}
 
 	snprintf(path, sizeof(path), "%s/ep0", r.ffs_dir);
 	ep0 = open(path, O_RDWR);
@@ -870,7 +1565,7 @@ int main(int argc, char **argv)
 		 * once, and only while enabled -- the ioctl is meaningless
 		 * before the gadget core has bound the endpoint.
 		 */
-		if (r.ready && !submitted) {
+		if (r.ready && !submitted && !r.td_open) {
 			if (!r.ep_verified && verify_out_ep(epfd, &r) < 0)
 				goto out;
 			for (i = 0; i < r.depth; i++)
@@ -886,9 +1581,20 @@ int main(int argc, char **argv)
 
 		/* opportunistic drain in case the eventfd was coalesced */
 		drain(ctx, slots, epfd, evfd, &r);
+
+		/*
+		 * Close an episode once no further -ESHUTDOWN has arrived for
+		 * settle_ms.  The poll above bounds this loop at 200 ms, so
+		 * the check still runs in a completely silent run.
+		 */
+		if (r.td_open &&
+		    now_s() - r.td_last_esd_t >= r.settle_ms / 1000.0)
+			teardown_close(&r, slots);
 	}
 
 	drain(ctx, slots, epfd, evfd, &r);
+	if (r.td_open)
+		teardown_close(&r, slots);
 	r.t_end = now_s();
 
 	printf("\n  ready=%d ep_verified=%d peak_inflight=%u completions=%llu "
@@ -904,8 +1610,11 @@ int main(int argc, char **argv)
 out:
 	if (!r.t_end) {
 		r.t_end = now_s();
+		if (r.td_open)
+			teardown_close(&r, slots);
 		write_artifact(&r);
 	}
+	holder_close(&r);
 	if (slots) {
 		for (i = 0; i < r.depth; i++)
 			free(slots[i].buf);
