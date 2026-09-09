@@ -7,6 +7,13 @@
 # blocked because its device producer cannot satisfy the active holder merger.
 set -u
 
+# The repository gate must be read-only with respect to its own evidence tree.
+# Python bytecode caches would change the archive Git-tree identity merely by
+# running verification, so suppress them inside the gate rather than relying on
+# the caller's environment.
+PYTHONDONTWRITEBYTECODE=1
+export PYTHONDONTWRITEBYTECODE
+
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$ROOT" || exit 2
 
@@ -69,7 +76,19 @@ else
             failmsg baseline_pins_not_ignored
         fi
     else
-        failmsg git_tracking_check_available
+        # GitHub source archives intentionally omit .git.  Do not convert that
+        # packaging fact into an integrity bypass: require an archive-native
+        # proof bound to the exact tracked baseline subtree and ignore policy.
+        archive_tmp=${TMPDIR:-/tmp}/dwc2-archive-tracking.$$
+        if [ -f verify_archive_tracking.py ] &&            python3 verify_archive_tracking.py "$ROOT" >"$archive_tmp" 2>&1; then
+            pass baseline_pins_tracked
+            pass baseline_pins_not_ignored
+            pass archive_tracking_proof
+        else
+            failmsg git_tracking_check_available
+            [ -s "$archive_tmp" ] && sed 's/^/  /' "$archive_tmp" >&2
+        fi
+        rm -f "$archive_tmp"
     fi
 fi
 
@@ -172,6 +191,34 @@ else
     holder_fail=1
 fi
 rm -f "$holder_tmp"
+
+# A checker nobody runs is a checker that can rot, and a discriminating control
+# that is only listed in a document is not executable.  These are mandatory.
+# holder_roundtrip.py builds the producer from source, so a C compiler is now a
+# gate requirement; without one it reports "cannot run" and this fails.
+for spec in \
+    'holder_contract_selftest:verify_holder_contract_selftest.py' \
+    'holder_log_guard_selftest:holder_log_guard_selftest.py' \
+    'holder_roundtrip:holder_roundtrip.py'
+do
+    label=${spec%%:*}
+    script=${spec#*:}
+    if [ ! -f "$script" ]; then
+        failmsg "$label"
+        printf '  missing: %s\n' "$script" >&2
+        holder_fail=1
+        continue
+    fi
+    ctl_tmp=${TMPDIR:-/tmp}/dwc2-$label.$$
+    if python3 "$script" >"$ctl_tmp" 2>&1; then
+        pass "$label"
+    else
+        failmsg "$label"
+        sed 's/^/  /' "$ctl_tmp" >&2
+        holder_fail=1
+    fi
+    rm -f "$ctl_tmp"
+done
 
 if [ "$baseline_fail" -eq 0 ]; then
     printf '%s\n' 'REPOSITORY_BASELINE: PASS'
