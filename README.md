@@ -65,6 +65,7 @@ Each transition requires its own artifact. A later claim is never inferred from 
 - [`docs/PIO-RX-TRACK.md`](docs/PIO-RX-TRACK.md) — separate source-proven PIO RX boundary finding.
 - [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md) — evidence and fail-closed methodology.
 - [`docs/HARDWARE-ENVIRONMENTS.md`](docs/HARDWARE-ENVIRONMENTS.md) — development hosts and their evidence limits.
+- [`docs/HARDWARE-ACQUISITION-GATE.md`](docs/HARDWARE-ACQUISITION-GATE.md) — result-before-purchase rule, experiment dependencies, board order, and budget ledger.
 - [`docs/PENDING.md`](docs/PENDING.md) — open claims and blockers.
 - [`docs/EVIDENCE-LADDER.md`](docs/EVIDENCE-LADDER.md) — proof contracts for R1A/R2/R3/Impact.
 - [`docs/RUNTIME-RUNBOOK.md`](docs/RUNTIME-RUNBOOK.md) — next hardware campaign.
