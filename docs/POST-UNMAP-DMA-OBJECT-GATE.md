@@ -2,8 +2,8 @@
 
 ## Purpose
 
-This gate exists only to resolve the C/object-code boundary in the DDMA-isoc dequeue branch.
-It does **not** attempt to prove `K_hw`, `D_issue`, `D_commit`, or security impact.
+This gate resolves only the C/object-code boundary in the DDMA-isoc dequeue branch.
+It does **not** prove `K_hw`, `D_issue`, `D_commit`, or security impact.
 
 The source-side facts are already frozen:
 
@@ -21,7 +21,7 @@ endpoint   = isochronous
 chain_started = yes
 ```
 
-For the DDMA-isoc path, source proves:
+Source proves:
 
 ```text
 A: descriptor publication
@@ -30,16 +30,19 @@ A: descriptor publication
    desc_list_dma -> DIEPDMA/DOEPDMA
    EPENA | CNAK
 
-B: no software retirement before U
+B: no software retirement around U
    ep_dequeue -> complete_request -> dma_unmap
    no descriptor clear
    no descriptor status rewrite
    no next_desc adjustment
    no compl_desc adjustment
    DDMA-isoc complete_request returns after giveback
+
+enabler source fact
+   offsetof(struct dwc2_hsotg_req, req) == 0
 ```
 
-The remaining object-level question is the lowering of:
+The remaining target-object question is the lowering of:
 
 ```c
 if (req == &hs_ep->req->req)
@@ -48,79 +51,207 @@ if (req == &hs_ep->req->req)
 dwc2_hsotg_complete_request(...);
 ```
 
-`struct dwc2_hsotg_req::req` is the first member, so its source offset is zero.  When
-`hs_ep->req == NULL`, however, `&hs_ep->req->req` is still a null-derived member-address
-expression in C.  The source alone must therefore not be used to claim the actual machine
-control flow.
+The zero member offset explains why a compiler can compare the value loaded from
+`hs_ep->req` directly against the `req` argument. Exact campaign closure is still
+bound to the final target object/image, architecture, compiler, flags, and config.
 
-## Exact closure artifact
+## Pattern-level result — closed but deliberately narrow
 
-The only admissible OBJECT_GATE closure artifact is generated from the exact campaign
-kernel object or linked image for the new evidence epoch.
-
-Required identity:
+A layout-matched reproducer was compiled with:
 
 ```text
-epoch_id
-kernel commit
-exact gadget.c SHA256
-exact object/vmlinux SHA256
-kernel config SHA256
-compiler identity
-objdump identity
-architecture / object format
-symbolized disassembly of dwc2_hsotg_ep_dequeue
+architecture  x86-64
+compiler      gcc 13.3
+optimization  -O2
+layout        struct usb_request req is first member / offset 0
 ```
 
-Capture it with:
+Observed control-flow shape:
+
+```asm
+call  on_list
+testl %eax, %eax
+je    <not-on-list>
+cmpq  %rbp, 16(%rbx)   # load hs_ep->req value and compare directly with req
+je    <stop-path>
+                        # otherwise continue to completion path
+```
+
+The same pattern was observed with and without `-fdelete-null-pointer-checks`.
+The pinned kernel Makefile adds `-fno-delete-null-pointer-checks`; that flag is
+therefore not treated as the carrier of the result.
+
+Frozen classification:
+
+```text
+PRIMARY-B enabler
+  offsetof(struct dwc2_hsotg_req, req) == 0   SOURCE-PROVEN
+  silent-skip codegen pattern                 PATTERN-PROVEN
+      scope: x86-64 / gcc 13.3 / -O2 layout reproducer
+  target campaign object                      PENDING_OBJECT_GATE
+```
+
+`PATTERN-PROVEN` is not `OBJECT-PROVEN` and must not be generalized to another
+architecture, toolchain, LTO mode, or target config.
+
+## Exact target artifact selection
+
+The artifact must correspond to the named G2.5 target and evidence epoch.
+
+```text
+non-LTO build:
+    drivers/usb/dwc2/gadget.o is admissible
+    final vmlinux/module is also admissible
+
+LTO build:
+    pre-link gadget.o is NOT admissible
+    use final linked vmlinux or the final linked module containing DWC2
+```
+
+Reason: with LTO, pre-link IR/object code need not reflect final code generation.
+
+The exact gate build must carry debug/source mapping (`-g` or equivalent debug-info
+configuration) so the machine instructions can be tied to the `ep_dequeue` source
+condition rather than guessed from addresses.
+
+Preferred inspection:
+
+```bash
+objdump -dS --disassemble=dwc2_hsotg_ep_dequeue <artifact>
+```
+
+or an architecture-matched equivalent such as cross-`objdump`, `llvm-objdump -dS`,
+or `gdb disassemble /s`.
+
+## Capture procedure
+
+Run the repository capture tool first:
 
 ```bash
 python3 tools/capture_ep_dequeue_object_gate.py selftest
 
 python3 tools/capture_ep_dequeue_object_gate.py capture \
-  <path-to-gadget.o-or-vmlinux> \
+  <gadget.o-or-final-linked-image> \
   --out artifacts/post-unmap-dma/object-gate-primary-b \
   --gadget-source <linux>/drivers/usb/dwc2/gadget.c \
   --config <linux>/.config \
   --epoch-id <new-epoch-id> \
+  --board-id <named-g2.5-board> \
   --kernel-commit f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8 \
   --compiler-identity "$(<compiler> --version | head -1)"
 ```
 
-For a cross-built ARM target, pass the matching disassembler explicitly when required,
-for example `--objdump arm-linux-gnueabihf-objdump` or `--objdump llvm-objdump`.
+For a cross target, pass the matching disassembler explicitly, for example:
 
-The capture tool intentionally emits:
+```text
+--objdump arm-linux-gnueabihf-objdump
+--objdump aarch64-linux-gnu-objdump
+--objdump llvm-objdump
+```
+
+The tool records object SHA256, config SHA256, compiler identity, objdump identity,
+board/epoch identity, LTO state from config, and source-interleaved disassembly.
+It refuses a pre-link `.o` when LTO is enabled and refuses closure capture when
+source context cannot be recovered.
+
+The capture result remains:
 
 ```text
 CAPTURED_NOT_ADJUDICATED
 ```
 
-It refuses a wrong `gadget.c` hash, missing object, missing function symbol, failed
-disassembler invocation, or pre-existing output directory.  Failed captures do not leave
-a completed artifact directory.
+Capture success is not OBJECT_GATE success.
 
-## OBJECT_GATE PASS
+## Pre-registered falsifier
 
-`PRIMARY-B` may cross the object gate only if the exact disassembly proves the following
-control-flow predicate:
+The gate is deliberately two-sided.
+
+### OBJECT-PROVEN
+
+Promote only when the exact named-target artifact establishes all of:
 
 ```text
-hs_ep->req == NULL
-    -> evaluation of the comparison does not perform a faulting memory access through NULL
-    -> branch does not call/reach dwc2_hsotg_ep_stop_xfr
-    -> control reaches dwc2_hsotg_complete_request
-    -> U remains reachable
+1. load hs_ep->req pointer value
+2. compare that value with the req argument
+3. retain a conditional branch separating stop from skip-stop
+4. no memory read through the loaded hs_ep->req value before the comparison
+5. hs_ep->req == NULL path reaches complete_request/U without executing stop
 ```
 
-Equivalent optimized or inlined code is acceptable only when the same control flow is
-recoverable from the exact linked image.  If LTO/inlining removes the standalone symbol,
-that is **not PASS**; capture/adjudication must move to the exact linked call site.
+Equivalent register allocation/instruction selection is allowed. The semantic
+predicate matters, not literal opcode spelling.
 
-A successful object gate promotes only:
+### KILLED
+
+Kill the silent-skip model if any of these is established on the exact artifact:
+
+```text
+A. memory is read through hs_ep->req before the comparison
+   -> NULL becomes a faulting path, not a silent skip
+
+B. the comparison is folded to a constant in a way that removes the proposed
+   NULL conditional behavior
+
+C. the stop sequence executes unconditionally on the NULL path
+```
+
+### INDETERMINATE
+
+```text
+source/line mapping unavailable
+object/config/compiler identity incomplete
+LTO build inspected only at pre-link .o
+control flow cannot be recovered from the final linked image
+```
+
+`INDETERMINATE` must never be promoted to PASS.
+
+## Inlining warning — do not search only for a call
+
+`dwc2_hsotg_ep_stop_xfr()` is `static` and may be inlined at optimization time.
+Therefore this is **not** a valid adjudication rule:
+
+```text
+no call dwc2_hsotg_ep_stop_xfr -> stop branch absent
+```
+
+The stop arm must be recognized by either:
+
+```text
+retained call to dwc2_hsotg_ep_stop_xfr
+```
+
+or the inlined register sequence corresponding to:
+
+```text
+SNAK / SGNPINNAK or SGOUTNAK
+wait for NAK-effective state
+EPDIS | SNAK
+wait for EPDISBLD
+```
+
+This prevents a false PASS caused only by function inlining.
+
+## Scope of an OBJECT-PROVEN result
+
+A successful exact gate promotes only:
 
 ```text
 PRIMARY-B skip-stop execution = OBJECT-PROVEN
+```
+
+and is qualified by:
+
+```text
+board_id
+architecture
+compiler + version
+compiler flags / config
+LTO state
+kernel commit
+gadget.c identity
+exact object/linked-image SHA256
+epoch_id
 ```
 
 It does not promote:
@@ -135,53 +266,6 @@ security impact
 
 Those remain `K_hw` / G3 / G4 / G6 questions.
 
-## OBJECT_GATE FAIL / INDETERMINATE
-
-```text
-FAIL
-    exact machine path faults before complete_request/U
-    or exact machine path necessarily reaches ep_stop_xfr
-
-INDETERMINATE
-    symbol/call site cannot be recovered with identity
-    disassembly is insufficient to establish the NULL path
-    object/config/compiler identity is incomplete
-    LTO/inlining changed the shape and linked-site proof was not captured
-```
-
-`INDETERMINATE` must never be promoted to PASS.
-
-## Preliminary compiler characterization — not closure
-
-A local control reproducer with the same zero-offset member pattern was compiled only to
-estimate whether the proposed silent-skip lowering is plausible.  These results are
-**not campaign evidence** and are not bound to a target board, target config, or target
-kernel object.
-
-Observed locally:
-
-```text
-GCC 14.2.0, x86_64, -O2
-    compares req directly against the pointer value loaded from ep->req
-    no second dereference through that loaded pointer before the branch
-
-Clang 17.0.0, x86_64, -O2
-    same shape
-
-Clang 17.0.0, armv7-linux-gnueabihf, -O2
-    ldr r2, [r0]
-    cmp r2, r1
-    bne skip_stop
-
-Clang 17.0.0, aarch64-linux-gnu, -O2
-    ldr x8, [x0]
-    cmp x8, x1
-    b.ne skip_stop
-```
-
-These observations strengthen the case for running the exact OBJECT_GATE but do not
-replace it.
-
 ## DDMA identity-drift side track
 
 Keep the identity issue separate from the post-unmap claim:
@@ -191,24 +275,27 @@ hardware completion identity  = compl_desc / descriptor slot
 software completion identity  = get_ep_head(hs_ep)
 ```
 
-`ep_dequeue` removes a request from the software queue while not adjusting `compl_desc` or
-retiring the corresponding descriptor.  Therefore the source establishes a descriptor/
-queue identity asymmetry, but a concrete wrong-request association remains a separate
-reachability proof.
+`ep_dequeue` removes a request from the software queue while not adjusting
+`compl_desc` or retiring the corresponding descriptor. The source therefore
+establishes a descriptor/queue identity asymmetry, but a concrete wrong-request
+association remains a separate reachability proof.
 
-For G4, never derive `same_mapping_identity` merely from queue order after a DDMA-isoc
-dequeue.  The runtime artifact must bind descriptor slot, DMA address, mapping ID, request
-ID, and epoch explicitly.
+For G4, never derive `same_mapping_identity` merely from queue order after a
+DDMA-isoc dequeue. Runtime evidence must bind descriptor slot, DMA address,
+mapping ID, request ID, dequeue sequence, and epoch explicitly.
 
 ## Current state
 
 ```text
 PRIMARY-A reset/disconnect   SOURCE-PROVEN ordering; K_hw OPEN
-PRIMARY-B DDMA-isoc dequeue  A SOURCE-PROVEN
-                             B SOURCE-PROVEN
-                             zero-offset enabler SOURCE-PROVEN
-                             silent skip EXACT OBJECT_GATE OPEN
-                             K_hw OPEN
+
+PRIMARY-B DDMA-isoc dequeue
+  A                          SOURCE-PROVEN
+  B                          SOURCE-PROVEN
+  zero-offset enabler        SOURCE-PROVEN
+  x86-64/gcc13.3 pattern     PATTERN-PROVEN
+  named target object        PENDING_OBJECT_GATE
+  K_hw                       OPEN
 
 R2 / D_issue                 UNKNOWN
 R3 / D_commit                UNKNOWN
