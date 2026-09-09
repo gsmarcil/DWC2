@@ -95,6 +95,19 @@ AQ-D1  post-Pi purchase decision
               one SECONDARY-ONLY RK3288 board
 ```
 
+## Source-prearrival eliminations for Pi
+
+The pinned DWC2 BCM platform parameters do not override gadget DMA enablement or descriptor-DMA enablement. `dwc2_set_bcm_params()` changes only host FIFO/transfer/count/AHB parameters. Gadget defaults remain hardware-derived:
+
+```text
+PI: g_dma      <- dma_capable derived from hardware capability
+PI: g_dma_desc <- hw->dma_desc_enable derived from GHWCFG4.DESC_DMA
+```
+
+Therefore the previously plausible branch "BCM platform parameters force gadget DMA off, so the DWC2 unmap path is unreachable on Pi" is killed at source for the pinned tree. This does not prove that the Pi hardware reports DMA-capable or descriptor-DMA-capable; those remain first-boot facts.
+
+This source result matters to procurement because it preserves the Pi as a meaningful PRIMARY-A runtime target without buying another board merely to avoid a platform-parameter override that does not exist.
+
 ## Why each experiment exists
 
 | ID | Board | Question | Decisive artifact | What it can save us from buying | Dependency created if it survives |
@@ -103,13 +116,33 @@ AQ-D1  post-Pi purchase decision
 | `PI-FB1` | Pi Zero 2 W | Is a real DWC2 gadget UDC reachable in usable peripheral state? | `/sys/class/udc` identity plus actual peripheral/operational state | any board bought merely to obtain first DWC2 runtime | enables `PI-R1A` |
 | `PI-FB2` | Pi Zero 2 W | Does this controller expose descriptor DMA for gadget mode? | `GHWCFG4.DESC_DMA` and effective parameter state | prevents buying accessories or building a PRIMARY-B plan that Pi cannot execute | if dead only on Pi, may justify another topology later |
 | `PI-R1A` | Pi Zero 2 W | Does the R1 trigger/timeout primitive survive on real hardware? | frozen R1A artifact or configuration-scoped negative | potentially all later hardware if the core primitive is killed | surviving blocker must be named before another purchase |
-| `PI-G25` | Pi Zero 2 W | What DMA translation actually occurs on this board? | CPU physical address, DMA address, `dma_to_phys`, backend/IOMMU state, SWIOTLB-pool membership | prevents transferring false DMA assumptions to RK3288 and buying on a bad premise | establishes Pi-only topology |
+| `PI-G25` | Pi Zero 2 W | What DMA translation actually occurs on this board? | CPU physical address, DMA address, translated physical address, backend/IOMMU state, and direct bounce-membership observation | prevents transferring false DMA assumptions to RK3288 and buying on a bad premise | establishes Pi-only topology |
 | `PI-G6` | Pi Zero 2 W | Can a memory-side effect be observed without cache ambiguity? | mapped, cache-line-isolated canary after the required ownership transition | may produce the needed completed-effect evidence without a second board | only if the relevant primitive and mapping model survive |
 | `RK-FB0` | Tinker S | What kernel topology actually booted? | running `.config` plus boot parameters | can immediately kill assumptions about LPAE/SWIOTLB before custom builds | enables valid interpretation of `RK-G25` |
 | `RK-FB1` | Tinker S | Is the RK3288 DWC2 UDC actually usable as the target role? | UDC identity plus actual operational peripheral state | avoids spending on a secondary RK3288 board when role bring-up is the real blocker | enables RK runtime tests |
 | `RK-FB2` | Tinker S | Is gadget descriptor DMA available? | `GHWCFG4.DESC_DMA` -> effective gadget parameter | can kill PRIMARY-B on this platform before deeper instrumentation | surviving PRIMARY-A/R1 work remains separate |
 | `RK-G25` | Tinker S | Is this mapping direct, translated, IOMMU-backed, or SWIOTLB-bounced? | per-mapping classification, not boot-log inference | decides whether the board actually supplies the topology for which it was bought | enables topology-dependent R2/R3/G6 work |
 | `RK-R1` | Tinker S | Does the remaining R1/R2/R3 hypothesis survive on the desired topology? | claim-specific runtime artifact | if decisive, eliminates all redundant RK3288 purchases | only board-specific ambiguity may authorize a secondary |
+
+## First-boot collection rule
+
+`PI-FB1 -> PI-FB2` is the logical decision order, not a requirement for separate boots. `GHWCFG4` is hardware configuration state and can be captured during the same first boot even if role bring-up later fails because of cable, overlay, or host conditions.
+
+Therefore the first Pi boot should collect both artifacts opportunistically:
+
+```text
+PI-FB1: UDC identity + role/operational state
+PI-FB2: GHWCFG4.DESC_DMA + effective g_dma_desc
+```
+
+Interpretation remains separate:
+
+```text
+PI-FB1 FAIL -> Pi runtime branch blocked/killed for that configuration
+PI-FB2 = 0  -> PRIMARY-B_ON_PI killed only
+```
+
+A failure in one does not erase a valid artifact from the other.
 
 ## G2.5 mapping classification rule
 
@@ -121,32 +154,44 @@ For each evidence-bearing mapping, record at minimum:
 cpu_va
 cpu_phys
 dma_addr
-dma_phys = dma_to_phys(dev, dma_addr)
+translated_dma_phys
 dma_ops/backend
 iommu_mapped
 dma_mask
 bus_dma_limit
 dma-ranges / active DT context
-SWIOTLB pool membership or equivalent direct observation
+bounce_membership
+bounce_membership_method
 ```
+
+The field is semantic: `bounce_membership` means whether the mapped physical address belongs to a SWIOTLB bounce pool (or equivalent bounce backing). The exact helper used is build/configuration-bound evidence and must be recorded in `bounce_membership_method`; do not hard-code one helper name into the evidence contract.
 
 Interpretation:
 
 ```text
 backend = dma-direct
-cpu_phys == dma_phys
-SWIOTLB membership = false
+cpu_phys == translated_dma_phys
+bounce_membership = false
     -> DIRECT_NO_BOUNCE
 
-SWIOTLB membership = true
+bounce_membership = true
     -> SWIOTLB_BOUNCE
 
 raw dma_addr != cpu_phys
-but dma_phys == cpu_phys
+but translated_dma_phys == cpu_phys
+and bounce_membership = false
     -> bus translation / dma-ranges, not bounce
 ```
 
 Pi and RK3288 MUST have separate G2.5 rows. No topology conclusion transfers between them.
+
+### Observer-linkage constraint
+
+The mapping observer implementation must be chosen only after the running kernel configuration is known.
+
+At the pinned ARM32 tree, `dma_to_phys()` is provided as a static inline in `include/linux/dma-direct.h` when `CONFIG_ARCH_HAS_PHYS_TO_DMA` is not selected, so it does not inherently require an exported module symbol. Nevertheless this header is DMA-internal rather than a stable module API, so the actual observer build and modpost result must be preserved as evidence instead of assuming portability.
+
+For SWIOTLB membership, helper availability depends on the exact configuration. In particular, an inline helper may call a non-exported internal routine under a dynamic-SWIOTLB configuration. If an out-of-tree loadable observer cannot link the required helper, use either an in-tree observer/patch or another configuration-correct direct observation. Do not substitute address inequality as a bounce detector.
 
 ## G6 canary placement rule
 
@@ -223,8 +268,9 @@ If any required field is unknown, authorization remains `DEFERRED`.
 ## Current decision
 
 ```text
-CURRENT PRIMARY          Raspberry Pi Zero 2 W — ACQUIRED / IN_TRANSIT
-NEXT TEST ORDER          PI-FB1 -> PI-FB2 -> PI-R1A -> PI-G25 -> conditional PI-G6
+CURRENT PRIMARY          Raspberry Pi Zero 2 W — ACQUIRED / IN TRANSIT
+FIRST BOOT COLLECTION    PI-FB1 + PI-FB2 in the same boot
+LOGICAL DECISION ORDER   PI-FB1 -> PI-FB2 -> PI-R1A -> PI-G25 -> conditional PI-G6
 NEXT PURCHASE            NONE AUTHORIZED
 TINKER BOARD S           DEFERRED pending AQ-D1 after Pi evidence
 SECOND RK3288 BOARD      NOT AUTHORIZED
