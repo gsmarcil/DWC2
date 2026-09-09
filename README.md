@@ -66,6 +66,9 @@ Each transition requires its own artifact. A later claim is never inferred from 
 - [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md) — evidence and fail-closed methodology.
 - [`docs/HARDWARE-ENVIRONMENTS.md`](docs/HARDWARE-ENVIRONMENTS.md) — development hosts and their evidence limits.
 - [`docs/HARDWARE-ACQUISITION-GATE.md`](docs/HARDWARE-ACQUISITION-GATE.md) — result-before-purchase rule, experiment dependencies, board order, and budget ledger.
+- [`docs/HARDWARE-COMMANDS.md`](docs/HARDWARE-COMMANDS.md) — board-specific command index for Pi Zero 2 W and any later purchase-authorized target.
+- [`docs/hardware/PI-ZERO-2W-COMMANDS.md`](docs/hardware/PI-ZERO-2W-COMMANDS.md) — copy/paste Pi first-boot, capability, topology, and artifact-capture commands.
+- [`docs/hardware/TINKER-BOARD-S-COMMANDS.md`](docs/hardware/TINKER-BOARD-S-COMMANDS.md) — deferred RK3288/Tinker command runbook, to be used only if `AQ-D1` authorizes the board.
 - [`docs/PENDING.md`](docs/PENDING.md) — open claims and blockers.
 - [`docs/EVIDENCE-LADDER.md`](docs/EVIDENCE-LADDER.md) — proof contracts for R1A/R2/R3/Impact.
 - [`docs/RUNTIME-RUNBOOK.md`](docs/RUNTIME-RUNBOOK.md) — next hardware campaign.
