@@ -36,3 +36,11 @@ Temporal adjacency is insufficient for R2. The chain must close identity across 
 ## D_issue vs D_commit
 
 An IOMMU fault can prove an attempted access to a retired mapping when correlation is closed. It does not prove the DMA transaction committed to memory. `D_commit` requires a memory-side observation or equivalent completed-effect evidence.
+
+## Hardware acquisition is also evidence-gated
+
+Hardware procurement follows the same closure discipline as claim promotion. A board is not purchased merely because a source hypothesis survived or because the board is generally useful.
+
+Before any new hardware purchase, the campaign must name the live blocker, define the decisive artifact the hardware can produce, exhaust cheaper equivalent paths, and define the first stop condition. Already-acquired hardware is tested for all inexpensive decisive artifacts before another board is authorized.
+
+The canonical procurement rule, experiment dependency graph, current board order, and budget ledger are maintained in [`HARDWARE-ACQUISITION-GATE.md`](HARDWARE-ACQUISITION-GATE.md).
