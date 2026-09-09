@@ -74,6 +74,18 @@ The historical v4.2 package predates that expanded keyset and does not itself
 contain the canonical device-harness source. Preserving an earlier device source
 does not rewrite the historical v4.2 epoch and does not close producer import.
 
+The historical fact is frozen explicitly as metadata **outside** `baseline/`:
+
+```text
+v4.2:
+    device_harness = ABSENT
+```
+
+This statement records absence; it does not add an artifact to v4.2. Any newly
+authored device harness, producer, observer helper, or runtime witness belongs to
+a new evidence epoch with its own bytes and identity. New bytes must never be
+attributed retroactively to an earlier evidence epoch.
+
 ## Historical note
 
 A more expanded predicate set (described during development as v3.2/v3.3) was discussed separately, including larger denominator/binding matrices and the device-harness epoch artifact. Its complete canonical artifact is not yet part of the current repository snapshot, so this repository does not claim those additional predicates as independently frozen here.
