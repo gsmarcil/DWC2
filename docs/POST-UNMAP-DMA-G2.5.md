@@ -2,31 +2,29 @@
 
 ## Gate purpose
 
-G2.5 answers two distinct questions without conflating them:
+G2.5 answers whether a **named target-build tuple** can exercise one of the surviving
+POST-UNMAP-DMA-001 campaigns with admissible identity. Board capability, build/DTB
+identity, DMA topology, rig readiness, and convenience witnesses are kept separate.
 
-1. Is a named DWC2 target fundamentally capable of exercising the selected R2 path?
-2. Is the current rig/build tuple ready to observe that target with admissible identity?
-
-A board must not be rejected merely because a convenience witness (`u_ether`) or a
-particular observer has not yet been built.
-
-The qualification order is frozen as follows:
+The qualification order is frozen as:
 
 ```text
-A. BOARD_CAPABLE
-B. RIG_BASE_READY
-C. DMA_TOPOLOGY_RESOLVED
----------------------------------
+1. CONTROLLER / CAMPAIGN CAPABILITY
+2. BUILD + DTB BINDING
+3. DMA TOPOLOGY / COHERENCY RESOLUTION
+4. RIG READY FOR THE SELECTED CAMPAIGN
+-------------------------------------------------
    R2-ELIGIBLE NAMED TARGET-BUILD
-D. CONVENIENCE / RANKING ONLY
+5. CONVENIENCE / RANKING ONLY
 ```
 
-`NET_IP_ALIGN` and the stock `u_ether` bounce path belong to D. They are never an
-initial board-admission predicate.
+Steps 2 and 3 are evaluated together in practice because `dma_path` and DMA coherency
+can change with the exact DTB and kernel configuration. `NET_IP_ALIGN` and stock
+`u_ether` are never board-admission predicates.
 
-## Candidate identity — board is not enough
+## Candidate identity — board identity is insufficient
 
-A G2.5 row is a **target-build tuple**, not merely a board name:
+A row is one exact campaign build:
 
 ```text
 TARGET_BUILD_ID =
@@ -36,20 +34,20 @@ TARGET_BUILD_ID =
     + kernel_commit
     + toolchain_id
     + config_hash
+    + dtb_hash
 ```
 
-This prevents evidence transfer between two builds on the same hardware. In
-particular, PRIMARY-A and PRIMARY-B may use the same physical board after a rebuild,
-but they are still distinct target-build tuples if `g_dma_desc`, config, toolchain,
-or linked artifact differs.
+`dtb_hash` is mandatory on DT platforms. It is independent from `config_hash` and may
+change `dma-ranges`, `dma-coherent`, `iommus`, role selection, PHY wiring, and therefore
+`dma_path` or coherency without changing the kernel binary.
 
-A single board may therefore satisfy both campaigns only as two separately bound
-rows/builds. Alternatively, two different boards may satisfy them.
+No runtime, OBJECT_GATE, R2, or R3 result transfers between rows with different
+`TARGET_BUILD_ID` values.
+
+One physical board may satisfy PRIMARY-A and PRIMARY-B only as two separately bound
+rows/builds. Two different boards are also permitted.
 
 ## Campaign split — no evidence inheritance
-
-L2 has two primary source survivors that require different DWC2 modes. They are
-separate campaigns and must not inherit runtime or object evidence from one another.
 
 ```text
 PRIMARY-A — reset/disconnect ordering
@@ -61,15 +59,15 @@ PRIMARY-B — DDMA isochronous dequeue
     g_dma      = 1
     g_dma_desc = 1
     endpoint   = isochronous
-    chain_started = required
+    chain_started = required at runtime
 ```
 
-A board may qualify for A, B, or both. G2.5 records eligibility per campaign-build,
-not as one global boolean.
+PRIMARY-A and PRIMARY-B are separate campaigns. A board supporting both modes still
+produces two campaign rows if the config, DTB, linked artifact, or toolchain differs.
 
-## A — BOARD_CAPABLE
+## 1 — CONTROLLER / CAMPAIGN CAPABILITY
 
-Immutable/controller capability fields are recorded before convenience ranking:
+Only immutable or SoC/controller-level capability belongs here:
 
 ```text
 board_name
@@ -79,20 +77,17 @@ udc_name
 udc_driver                     = dwc2
 peripheral_gadget_mode         = reachable | unreachable
 
-supports_g_dma                 = yes | no
-supports_g_dma_desc            = yes | no
-isoc_ep_available              = yes | no
+supports_g_dma                 = yes | no | unknown
+supports_g_dma_desc            = yes | no | unknown
+isoc_ep_available              = yes | no | unknown
 
-primary_a_address_dma          = reachable | unreachable
-primary_a_expected_params      = g_dma=1, g_dma_desc=0
-primary_a_reset_path           = reachable | unreachable
+primary_a_address_dma          = reachable | unreachable | unknown
+primary_a_reset_path           = reachable | unreachable | unknown
 
-primary_b_ddma                 = reachable | unreachable
-primary_b_expected_params      = g_dma=1, g_dma_desc=1
-primary_b_chain_start          = reachable | unreachable
+primary_b_ddma                 = reachable | unreachable | unknown
 ```
 
-The three capability columns below are mandatory in every candidate matrix:
+The mandatory board-capability columns are:
 
 ```text
 supports_g_dma
@@ -100,73 +95,120 @@ supports_g_dma_desc
 isoc_ep_available
 ```
 
-They are evaluated before `NET_IP_ALIGN` or any stock-canary convenience. A board
-that cannot expose the selected campaign mode is not rescued by a convenient
-unaligned-buffer path.
+`isoc_ep_available` means the DWC2 controller exposes a usable isochronous endpoint.
+It does **not** mean the current rig has a gadget function that opens it.
 
-A board is not rejected merely because only one campaign mode is available. The
-selected campaign determines which capability predicate must be satisfied.
-
-## B — RIG_BASE_READY and build binding
-
-Repairable operator/rig prerequisites are recorded separately:
+The source pin auto-derives gadget DMA mode from hardware capability:
 
 ```text
-kernel_control                 = yes | no
-dtb_control                    = yes | no
-host_bus_reset_trigger         = yes | no        # required by PRIMARY-A
-isoc_host_stimulus             = yes | no        # required by PRIMARY-B
-observer_build_control         = yes | no
-object_disassembly_available   = yes | no        # required to close PRIMARY-B silent-skip gate
+g_dma      = controller architecture is DMA-capable
+g_dma_desc = hw_params.dma_desc_enable
 ```
 
-The build identity is part of the candidate row, not a later annotation:
+A historical board/platform setting is corroboration but does not replace the exact
+named target's hardware/config artifact when the current source pin auto-detects a
+field.
+
+## 2 — BUILD + DTB BINDING
+
+The build/description inputs are part of the candidate row before topology is judged:
 
 ```text
 architecture
 toolchain_id
 config_hash                    = sha256(exact campaign .config)
+dtb_hash                       = sha256(exact booted DTB)
 kernel_commit
 lto_enabled                    = yes | no
+kernel_control                 = yes | no
+dtb_control                    = yes | no
+observer_build_control         = yes | no
 ```
 
-For a board that supports both campaigns after rebuild, the matrix records two
-campaign-specific bindings, for example:
+For a board reused across campaigns:
 
 ```text
 PRIMARY-A row:
     board_id = X
+    campaign_id = PRIMARY-A
     toolchain_id = T_A
     config_hash = C_A
+    dtb_hash = D_A
     g_dma=1, g_dma_desc=0
 
 PRIMARY-B row:
     board_id = X
+    campaign_id = PRIMARY-B
     toolchain_id = T_B
     config_hash = C_B
+    dtb_hash = D_B
     g_dma=1, g_dma_desc=1
 ```
 
-`T_A == T_B` or `C_A == C_B` must never be assumed. Evidence is scoped to the exact
-row that produced it.
+Equality of toolchain/config/DTB across those rows must never be assumed.
 
-### PRIMARY-B named-target OBJECT_GATE binding
+## 3 — DMA TOPOLOGY / COHERENCY RESOLUTION
 
-The layout-matched x86-64/gcc-13.3 reproducer has closed only the generic lowering
-pattern:
+Topology is resolved from the exact row's DTB/config plus runtime/build artifacts before
+full rig qualification, because a bounce path can invalidate the intended canary witness.
 
 ```text
-silent-skip codegen pattern = PATTERN-PROVEN
-scope = x86-64 / gcc 13.3 / -O2 reproducer
+dma_path                       = direct | bounce(SWIOTLB) | iommu | unresolved
+dma_coherent                   = yes | no | unresolved
+cache_maintenance_at_unmap     = yes | no | not-applicable | unresolved
+driver_local_bounce            = yes | no | unresolved
 ```
 
-It is not target closure. For every named PRIMARY-B target-build, G2.5 must record:
+Interpretation rules:
+
+- `dma_path=bounce(SWIOTLB)` means a late device write may land in the SWIOTLB allocation
+  rather than the intended canary. A clean canary is then not admissible negative evidence.
+- On a non-coherent platform, cache maintenance at `U` can hide, delay, or create
+  CPU-visible transitions. Canary interpretation remains open until classified.
+- A DWC2-local bounce changes the object actually mapped and must be carried in mapping
+  identity.
+- `dma-ranges`, `dma-coherent`, and `iommus` are DT-sensitive; this is why `dtb_hash` is
+  part of `TARGET_BUILD_ID`.
+
+A row that cannot make its observer semantics valid for its DMA topology is not accepted
+merely because the board/controller supports the required mode.
+
+## 4 — RIG READY
+
+Repairable execution prerequisites are separate from board capability and topology:
+
+```text
+host_bus_reset_trigger         = yes | no        # PRIMARY-A
+
+isoc_gadget_function           = <name> | none   # PRIMARY-B
+isoc_function_opens_endpoint   = yes | no        # PRIMARY-B
+isoc_host_stimulus             = yes | no        # PRIMARY-B
+primary_b_chain_start_observable = yes | no      # PRIMARY-B
+
+object_disassembly_available   = yes | no        # PRIMARY-B OBJECT_GATE
+```
+
+For PRIMARY-B, `isoc_ep_available=yes` at the board level is insufficient. The rig must
+bind a real gadget function that opens an isochronous endpoint and drives the DWC2 chain
+to the started state (`target_frame != TARGET_FRAME_INITIAL` / NAK or OUTTKNEPDIS start
+path as applicable).
+
+### PRIMARY-B exact OBJECT_GATE binding
+
+The layout-matched x86-64/gcc-13.3/-O2 reproducer establishes only:
+
+```text
+silent-skip codegen = PATTERN-PROVEN
+```
+
+For each PRIMARY-B target-build row record:
 
 ```text
 board_id
 architecture
 toolchain_id
 config_hash
+dtb_hash
 kernel_commit
 gadget_c_sha256
 lto_enabled                    = yes | no
@@ -176,7 +218,7 @@ object_gate_artifact_sha256
 object_gate_status             = PENDING_OBJECT_GATE | OBJECT-PROVEN | KILLED | INDETERMINATE
 ```
 
-Artifact selection is part of feasibility:
+Artifact selection:
 
 ```text
 if lto_enabled == no:
@@ -184,116 +226,96 @@ if lto_enabled == no:
 
 if lto_enabled == yes:
     pre-link gadget.o is inadmissible
-    require final vmlinux or final linked module containing DWC2
+    require final vmlinux or the final linked module containing DWC2
 ```
 
-The target gate must be built with debug/source mapping and inspected with
-source-interleaved disassembly, for example:
+Use source-interleaved disassembly (`objdump -dS` or equivalent). Do not require a
+literal `call dwc2_hsotg_ep_stop_xfr`: the helper is static and may be inlined.
 
-```bash
-objdump -dS --disassemble=dwc2_hsotg_ep_dequeue <artifact>
-```
-
-The adjudication predicate is pre-registered:
+Pre-registered verdict:
 
 ```text
 OBJECT-PROVEN
   load hs_ep->req
-  -> compare pointer value with req argument
+  -> compare its pointer value with req
   -> conditional branch remains
   -> no read through hs_ep->req before comparison
-  -> NULL path skips stop and reaches complete_request/U
+  -> NULL path skips the stop arm and reaches complete_request/U
 
 KILLED
-  any read through hs_ep->req before comparison
-  OR comparison folded to a constant that invalidates the silent-skip model
-  OR stop sequence executes unconditionally on the NULL path
+  read through hs_ep->req before comparison
+  OR comparison is folded so the proposed NULL path disappears
+  OR stop sequence executes unconditionally on that path
 ```
 
-Do not require a literal `call dwc2_hsotg_ep_stop_xfr`: the helper is static and
-may be inlined. The stop arm may instead appear as the inlined SNAK/SGOUTNAK,
-EPDIS, and wait sequence.
+A capture with incomplete identity or unrecoverable final control flow is
+`INDETERMINATE`, never PASS.
 
-`PRIMARY_B_R2_ELIGIBLE` may be selected while `object_gate_status` is pending, but
-the silent-skip execution claim remains `PENDING_OBJECT_GATE` until the exact
-named target-build artifact reaches a terminal verdict.
-
-## C — DMA_TOPOLOGY_RESOLVED
-
-These fields must be known before interpreting a negative canary result:
-
-```text
-dma_path                       = direct | bounce(SWIOTLB) | iommu
-dma_coherent                   = yes | no
-cache_maintenance_at_unmap     = yes | no | not-applicable
-driver_local_bounce            = yes | no
-```
-
-The ordering matters:
-
-- `dma_path=bounce(SWIOTLB)` can redirect a late device write into the bounce
-  allocation rather than the intended canary object. A clean canary is then not
-  evidence of no late DMA.
-- On a non-coherent platform, cache maintenance at `U` can hide, delay, or create
-  CPU-visible state transitions. Canary interpretation is inadmissible until that
-  behavior is classified.
-- A DWC2-local bounce buffer changes the object actually mapped to the controller
-  and must be carried in mapping identity.
-
-Promotion is per campaign-build:
+## R2 eligibility predicates
 
 ```text
 PRIMARY_A_R2_ELIGIBLE =
     supports_g_dma == yes
-    && address-DMA/reset path reachable
-    && exact PRIMARY-A build binding recorded
-    && corresponding rig prerequisites ready
-    && DMA topology resolved
+    && primary_a_address_dma == reachable
+    && primary_a_reset_path == reachable
+    && exact build + DTB identity recorded
+    && DMA topology/coherency resolved with admissible observer semantics
+    && host_bus_reset_trigger == yes
 
 PRIMARY_B_R2_ELIGIBLE =
     supports_g_dma == yes
     && supports_g_dma_desc == yes
     && isoc_ep_available == yes
-    && DDMA chain-start path reachable
-    && exact PRIMARY-B build binding recorded
-    && corresponding rig prerequisites ready
-    && DMA topology resolved
-    && exact target-object gate can be captured/adjudicated
+    && primary_b_ddma == reachable
+    && exact build + DTB identity recorded
+    && DMA topology/coherency resolved with admissible observer semantics
+    && isoc_function_opens_endpoint == yes
+    && isoc_host_stimulus == yes
+    && primary_b_chain_start_observable == yes
+    && object_disassembly_available == yes
 ```
+
+`object_gate_status=PENDING_OBJECT_GATE` may coexist with a feasible PRIMARY-B row, but
+the silent-skip execution claim remains pending until the exact target object receives a
+terminal verdict.
 
 ## Candidate matrix schema
 
-Every enumerated target should be represented with at least these columns before
-ranking:
+Every enumerated campaign row carries at least:
 
 | Field | Meaning |
 |---|---|
-| `board_id` | stable physical-board identity |
+| `board_id` | stable physical board identity |
+| `campaign_id` | PRIMARY-A or PRIMARY-B |
 | `soc` | SoC/controller identity |
 | `arch` | target architecture |
 | `supports_g_dma` | address DMA capability |
-| `supports_g_dma_desc` | DDMA capability |
-| `isoc_ep_available` | usable isochronous endpoint |
+| `supports_g_dma_desc` | descriptor DMA capability |
+| `isoc_ep_available` | hardware isochronous endpoint capability |
 | `primary_a_reset_path` | host-triggerable reset/disconnect path |
-| `primary_b_chain_start` | reachable NAK/OUTTKNEPDIS DDMA-isoc start |
-| `kernel_control` | exact kernel rebuild/control available |
-| `dtb_control` | device-tree control available |
-| `dma_path` | direct / SWIOTLB / IOMMU |
-| `dma_coherent` | platform DMA coherency |
-| `toolchain_id` | exact compiler/linker tuple for this row |
+| `primary_b_ddma` | DDMA mode reachable |
+| `kernel_control` | exact kernel build/control available |
+| `dtb_control` | exact DTB control available |
+| `toolchain_id` | compiler/linker tuple bound to row |
 | `config_hash` | SHA256 of exact campaign config |
-| `lto_enabled` | determines admissible object artifact |
-| `campaign_id` | PRIMARY-A or PRIMARY-B |
-| `r2_eligible` | derived verdict after A+B+C |
-| `effective_net_ip_align` | convenience/ranking only |
-| `stock_u_ether_canary_shortcut` | convenience/ranking only |
+| `dtb_hash` | SHA256 of exact booted DTB |
+| `lto_enabled` | chooses admissible OBJECT_GATE artifact |
+| `dma_path` | direct / SWIOTLB / IOMMU / unresolved |
+| `dma_coherent` | DMA coherency for exact DTB/build |
+| `cache_maintenance_at_unmap` | relevant non-coherent behavior |
+| `host_bus_reset_trigger` | PRIMARY-A rig predicate |
+| `isoc_gadget_function` | PRIMARY-B rig function |
+| `isoc_function_opens_endpoint` | PRIMARY-B rig predicate |
+| `isoc_host_stimulus` | PRIMARY-B rig predicate |
+| `primary_b_chain_start_observable` | PRIMARY-B started-chain evidence ability |
+| `object_gate_status` | PRIMARY-B exact-codegen verdict |
+| `r2_eligible` | derived campaign-row verdict |
+| `effective_net_ip_align` | ranking only |
+| `stock_u_ether_canary_shortcut` | ranking only |
 
-This schema intentionally permits two rows for one board when PRIMARY-A and
-PRIMARY-B require separate builds.
+## 5 — convenience / witness ranking
 
-## D — convenience / witness ranking
-
-Convenience fields are evaluated only among already eligible target-builds:
+Only after a row survives the R2 predicates do we rank convenience:
 
 ```text
 effective_net_ip_align
@@ -305,24 +327,13 @@ stock_u_ether_canary_shortcut  = yes | no
 custom_gadget_canary_feasible  = yes | no
 ```
 
-`net_ip_align_nonzero` is deliberately not used: DWC2 tests `(long)req_buf & 3`,
-so a non-zero alignment value that is still a multiple of four does not activate
-the local bounce path.
-
-For the stock `u_ether` RX shortcut:
+The stock `u_ether` shortcut requires:
 
 ```text
 ((effective_NET_IP_ALIGN & 3) != 0)
 && udc_quirk_avoids_skb_reserve == no
 && u_ether RX path reachable
 ```
-
-`u_ether` conditionally calls `skb_reserve(skb, NET_IP_ALIGN)` only when
-`dev->no_skb_reserve` is false. That value originates from the gadget/UDC
-`quirk_avoids_skb_reserve` policy. The pinned DWC2 source audit found no DWC2
-assignment of `quirk_avoids_skb_reserve` (nor `quirk_ep_out_aligned_size`) in
-`gadget.c`, `core.h`, or `params.c`; the field remains explicit because it is a UDC
-property, not an architecture property.
 
 Critical non-implication:
 
@@ -332,74 +343,39 @@ stock_u_ether_canary_shortcut = no
 G6 = BLOCKED
 ```
 
-The stock path is only a convenience witness. G6 may use a new-epoch custom gadget
-function that owns and identities its own DMA buffer, subject to frozen provenance
-rules.
+A new-epoch custom gadget can still own and identify its canary buffer.
 
-## `u_ether` architecture filter
+Pinned source convenience filter:
 
-Pinned Linux source:
-
-```text
-commit: f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
-u_ether.c sha256: b2f84b7b9a97a3dd46b27114d24ab3755af7182999dcf0e37a97d8ec4fba45e4
-```
-
-The generic fallback is:
-
-```c
-#ifndef NET_IP_ALIGN
-#define NET_IP_ALIGN 2
-#endif
-```
-
-Verified source values:
-
-| Kernel architecture | Effective value known from source | Stock u_ether offset candidate |
+| Kernel architecture | Effective source value | Stock `u_ether` offset candidate |
 |---|---:|---|
 | arm64 | `0` | DEAD |
 | x86 | `0` | DEAD |
-| arm32 | no definition in `arch/arm/include/asm/processor.h`; generic fallback is `2` | `PENDING_PREPROCESSOR_CONFIRM` |
+| arm32 | generic fallback `2`, but earlier override still possible | `PENDING_PREPROCESSOR_CONFIRM` |
 
-The ARM32 row is not promoted until the exact target kernel build is preprocessed
-or compiled and the effective value is retained as a build artifact. This table
-ranks qualified target-builds; it does not qualify them.
+The ARM32 row is promoted only from the exact target build/preprocessor artifact.
 
-## FunctionFS filter
-
-Standard FunctionFS is not a route to DWC2's local unaligned-buffer bounce:
-non-SG I/O gives DWC2 a kernel `kmalloc` buffer and SG I/O sets `req->buf=NULL`.
+Standard FunctionFS does not expose an arbitrary unaligned userspace pointer as
+`usb_request->buf`; therefore:
 
 ```text
-FunctionFS -> DWC2 unaligned bounce = DEAD
+FunctionFS -> DWC2 local unaligned bounce = DEAD
 ```
 
-This only kills that convenience witness; it does not block FunctionFS as a holder
-mechanism for PRIMARY-A and does not block a custom G6 canary.
+This does not block FunctionFS as a request/holder mechanism for PRIMARY-A or a custom
+G6 witness.
 
-## Canary feasibility
+## Canary attribution and R2/R3 implication
 
-`canary_feasible` is derived only after topology is known:
-
-```text
-canary_feasible =
-    selected_campaign_R2_ELIGIBLE
-    && mapping identity can be preserved/proven
-    && observer semantics are valid for dma_path/coherency
-    && (stock_u_ether_canary_shortcut || custom_gadget_canary_feasible)
-```
-
-For a no-IOMMU board, attribution additionally requires:
+For a no-IOMMU target:
 
 ```text
 commit_content_matches_host_payload = REQUIRED
 ```
 
-A generic memory change is insufficient to attribute `D_commit` to DWC2.
+A generic memory modification does not attribute the write to DWC2.
 
-## R2/R3 implication rule
-
-R2 may also be discharged by a qualified R3 artifact:
+A qualified R3 artifact may discharge R2 by implication:
 
 ```text
 D_commit
@@ -416,55 +392,48 @@ The reverse implication is invalid:
 D_issue !=> D_commit
 ```
 
-For PRIMARY-B, G4 additionally must not infer mapping identity from DDMA queue
-position alone. Runtime records must bind descriptor identity, request identity,
-mapping identity, and dequeue sequence explicitly.
+For PRIMARY-B, never derive `same_mapping_identity` from queue order or `compl_desc`
+alone. Runtime evidence must bind descriptor slot, request ID, mapping ID, DMA address,
+dequeue sequence, and epoch.
 
 ## G2.5 exit
 
-Normal exit for either campaign:
+Per campaign:
 
 ```text
-at least one named target-build
-&& campaign-specific BOARD_CAPABLE predicate
-&& campaign-specific RIG_BASE_READY/build binding
-&& DMA_TOPOLOGY_RESOLVED
+at least one named TARGET_BUILD_ID
+&& campaign capability predicate
+&& exact build + DTB identity
+&& DMA topology/coherency resolved
+&& campaign rig ready
 => G2.5 PASS for that campaign
 ```
 
-One physical board can satisfy both exits only through separately recorded
-campaign-build tuples. If no enumerated target-build satisfies a campaign:
+If the enumerated set is empty:
 
 ```text
 G2.5_TARGET_SET = EMPTY
 => reorder to G3 -> G4 -> G6
 ```
 
-Canary remains primary and IOMMU optional. Missing stock `u_ether` is not an
-empty-target condition.
+Canary remains primary; IOMMU remains optional.
 
 ## Current G2.5 status
 
 ```text
-source/architecture convenience filter:
-    arm64 stock u_ether bounce   DEAD
-    x86 stock u_ether bounce     DEAD
-    arm32 stock u_ether bounce   CANDIDATE / PREPROCESSOR CONFIRM REQUIRED
-
-DWC2 quirk audit:
-    quirk_avoids_skb_reserve assignment in audited DWC2 files  NOT OBSERVED
+PRIMARY-B codegen pattern      PATTERN-PROVEN (x86-64/gcc13.3/-O2 reproducer)
+PRIMARY-B target object        PENDING_OBJECT_GATE
 
 mandatory capability columns:
     supports_g_dma
     supports_g_dma_desc
     isoc_ep_available
 
-mandatory build-binding columns:
+mandatory build identity:
     toolchain_id
     config_hash
+    dtb_hash
 
-PRIMARY-B codegen pattern      PATTERN-PROVEN (x86-64/gcc13.3/-O2 reproducer)
-PRIMARY-B target object        PENDING_OBJECT_GATE
 PRIMARY-A named target-build   NOT YET FROZEN
 PRIMARY-B named target-build   NOT YET FROZEN
 DMA topology                   NOT YET FROZEN
