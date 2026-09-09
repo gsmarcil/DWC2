@@ -30,9 +30,9 @@ or that any security impact exists.
 
 ```text
 K_sw_ATTEMPTED
-    source executes a documented stop/NAK/disable sequence and waits for the
-    relevant completion/status bit before U, but timeout is warning-only and
-    execution continues.
+    source executes a stop/NAK/disable sequence and waits for the relevant
+    completion/status bit before U, but timeout is warning-only and execution
+    continues.
 
 K_sw_OBSERVED
     runtime artifact for one execution proves all required waits completed
@@ -42,54 +42,37 @@ K_hw
     databook binds the observed terminal bit/state to DMA drain/quiescence.
 ```
 
-The source cannot promote `K_sw_ATTEMPTED` to `K_sw_OBSERVED` because every wait
-inside `dwc2_hsotg_ep_stop_xfr()` is fail-open: timeout emits `dev_warn()` and
-control continues. Therefore:
+Every wait inside `dwc2_hsotg_ep_stop_xfr()` is fail-open: timeout emits
+`dev_warn()` and control continues. Therefore:
 
 ```text
 L2.4 SOURCE-CLOSED = EMPTY at source-only stage
 ```
 
 No source partition is created for “successful wait” versus “timeout”; that is a
-runtime partition. The runtime observer must record, for every stop attempt, which
-wait(s) completed and which timed out.
+runtime partition. The observer must record, for every stop attempt, which wait(s)
+completed and which timed out.
 
-The remaining classes are:
+## L2.1 — unique map and unmap sink
+
+Map:
 
 ```text
-L2.5  no K_sw attempt before U                    -> SURVIVOR
-L2.6  K_sw_ATTEMPTED before U, K_hw unresolved   -> DATABOOK/RUNTIME GATE
+dwc2_hsotg_ep_queue()
+  -> dwc2_hsotg_map_dma()
+     -> usb_gadget_map_request()
 ```
 
-Normal `XFERCOMPL`/DDMA `DMADONE` completion is also a databook gate and is kept
-separate from teardown stop semantics.
-
-## L2.1 — unique map and unique unmap sink
-
-### Map
-
-The request mapping path is unique in `gadget.c`:
+Unmap:
 
 ```text
-dwc2_hsotg_ep_queue()               : ~1465
-  -> dwc2_hsotg_map_dma()            : ~1263
-     -> usb_gadget_map_request()      : ~1270
-```
-
-The gadget core then performs either `dma_map_single()` or `dma_map_sg()`.
-
-### Unmap
-
-The request unmap sink is also unique:
-
-```text
-dwc2_hsotg_complete_request()        : ~2140
+dwc2_hsotg_complete_request()
   -> dwc2_hsotg_unmap_dma()
      -> usb_gadget_unmap_request()
         -> dma_unmap_single() | dma_unmap_sg()
 ```
 
-The ordering inside `dwc2_hsotg_complete_request()` is fixed:
+Fixed order in `dwc2_hsotg_complete_request()`:
 
 ```text
 U: unmap
@@ -100,18 +83,20 @@ U: unmap
  -> usb_gadget_giveback_request()
 ```
 
-Consequently G4 needs one canonical `UNMAP_DONE` observation point for DWC2 request
-cleanup rather than separate per-teardown unmap probes.
+In DDMA isochronous mode the function then returns directly; it does not rebuild,
+retire, clear, or invalidate the descriptor ring.
 
-## L2.2 — only source stop candidate
+Consequence for G4: `UNMAP_DONE` has one canonical DWC2 request-cleanup probe.
 
-The only general teardown stop candidate is:
+## L2.2 — source stop candidate
+
+The general teardown stop primitive is:
 
 ```text
-dwc2_hsotg_ep_stop_xfr()             : ~3917
+dwc2_hsotg_ep_stop_xfr()
 ```
 
-Its sequence is direction-dependent but converges on endpoint disable:
+Direction-dependent sequence:
 
 ```text
 IN:
@@ -128,11 +113,10 @@ both:
   clear EPDISBLD
 ```
 
-Every wait is timeout-bounded and warning-only. No timeout returns an error, retries
-the stop, or blocks the subsequent completion/unmap path. Thus the source-level
-classification is always `K_sw_ATTEMPTED`, never `K_sw_OBSERVED`.
+All four DMA-mode waits are timeout-bounded and warning-only. Thus source can prove
+only `K_sw_ATTEMPTED`, never `K_sw_OBSERVED`.
 
-The runtime observer must therefore record at least:
+Runtime records must carry at least:
 
 ```text
 stop_seq
@@ -143,201 +127,222 @@ wait_epdisbld_timeout
 unmap_seq
 ```
 
-Only waits applicable to the endpoint/direction are populated for a given attempt.
+## L2.3 — source partition table
 
-## L2.3 — source path partition
-
-| Path | stop before U | Source classification |
+| Path | Stop before U | Source classification |
 |---|---|---|
 | normal completion | no explicit stop; completion semantics only | L2.6 / databook gate |
-| `ep_dequeue` active request (`~4348`) | `ep_stop_xfr()` attempted when request is current | L2.6 |
-| `ep_dequeue` queued request never published to hardware | none, but `O=NO` | CLOSED as non-exposed mapping |
-| **DDMA isoc `ep_dequeue`, descriptor-published request** | stop decision depends on `&hs_ep->req->req`; DDMA-isoc publication does not use `dwc2_hsotg_start_req()` | **CANDIDATE — COMPILER/OBJECT GATE** |
-| `ep_disable` (`~4272`), `DXEPCTL_EPENA=1` | `ep_stop_xfr()` attempted | L2.6 |
-| `ep_disable`, `DXEPCTL_EPENA=0` | no stop call | L2.5 candidate; requires prior-ownership classification |
-| `core_init_disconnected()` EP0 kill (`~3394`) | kill precedes core reset/EP disable | L2.5 SURVIVOR |
-| `dwc2_hsotg_disconnect()` (`~3315`) | no stop/disable before `kill_all_requests()` | **L2.5 PRIMARY SURVIVOR** |
+| `ep_dequeue`, ordinary active request | `ep_stop_xfr()` attempted when request is current | L2.6 |
+| `ep_dequeue`, queued request never published | none, `O=NO` | CLOSED as non-exposed mapping |
+| `ep_disable`, `EPENA=1` | `ep_stop_xfr()` attempted | L2.6 |
+| `ep_disable`, `EPENA=0` | no stop call | L2.5 candidate; prior ownership required |
+| `core_init_disconnected`, EP0 | kill precedes core reset/EP disable | L2.5 SURVIVOR |
+| `dwc2_hsotg_disconnect` | no stop/disable before kill | **PRIMARY-A** |
+| DDMA-isoc `ep_dequeue`, descriptor-published request | no descriptor retirement before U; stop decision passes through null-derived member-address expression | **PRIMARY-B, source-qualified; OBJECT_GATE still required for the silent-skip execution claim** |
 
-## L2_PRIMARY — bus-reset / disconnect ordering
+## PRIMARY-A — bus-reset / disconnect ordering
 
-The device IRQ holds `hsotg->lock` through the handler pass. Within the
-`GINTSTS_USBRST | GINTSTS_RESETDET` branch, source order is:
-
-```text
-read GOTGCTL
-save hsotg->connected
-ack USBRST
-
-dwc2_hsotg_disconnect()               : ~3757
-  -> for every IN/OUT endpoint
-     kill_all_requests()
-       -> dwc2_hsotg_complete_request()
-          -> U
-
-clear device address
-
-if (GOTGCTL.BSESVLD && connected)
-  dwc2_hsotg_core_init_disconnected(true) : ~3763
-    -> ep_disable() for non-EP0 endpoints
-       -> ep_stop_xfr() only here
-```
-
-Thus on the reset path the request unmap precedes the later endpoint-disable/stop
-sequence inside the same interrupt handling flow. By the time `ep_disable()` runs,
-the request queues have already been drained by `disconnect()`.
-
-### Mandatory qualification
-
-Promotion to `L2_PRIMARY` carries both constraints below:
+Within one `dwc2_hsotg_irq` pass for `USBRST | RESETDET`:
 
 ```text
-reachability:
-    hsotg->connected == 1
-    otherwise dwc2_hsotg_disconnect() returns immediately
+dwc2_hsotg_disconnect()
+  -> kill_all_requests(all endpoints)
+     -> dwc2_hsotg_complete_request()
+        -> U
 
-scope:
-    proves ordering only
-    does NOT prove that any request was hardware-active at the reset edge
-    hardware-active ownership remains R1A / G3
+then, only afterwards:
+
+dwc2_hsotg_core_init_disconnected(true)
+  -> ep_disable()
+     -> ep_stop_xfr() conditionally
 ```
 
-A host-originated USB bus reset is therefore the primary source survivor because it
-reaches a `U-before-stop` ordering without relying on a local teardown API call.
-Whether USB reset itself causes the DWC2 core to quiesce DMA is explicitly **not**
-a source conclusion here; that remains the `K_hw` / databook gate.
-
-## DDMA isochronous dequeue candidate — COMPILER/OBJECT GATE
-
-This candidate is separate from the address-DMA primary track and is retained
-because it may expose a more direct `published descriptor -> U without stop`
-ordering.
-
-### Publication path
-
-For DDMA isochronous requests, source order is:
+Mandatory qualification:
 
 ```text
-ep_queue
-  -> map request
-  -> add request to hs_ep->queue
-  -> dwc2_gadget_fill_isoc_desc()
-       desc->buf = request DMA address
-       desc->status = HREADY
-
-first start / chain rebuild:
-  dwc2_gadget_start_isoc_ddma()
-    -> initialize descriptor ring
-    -> fill descriptors for requests in hs_ep->queue
-    -> write hs_ep->desc_list_dma to DIEPDMA/DOEPDMA
-    -> set EPENA | CNAK
+reachability = hsotg->connected == 1
+scope        = ordering-only; active hardware ownership remains R1A/G3
 ```
 
-`dwc2_gadget_start_isoc_ddma()` does not assign `hs_ep->req`. The assignment
-`hs_ep->req = hs_req` belongs to `dwc2_hsotg_start_req()`, which is the ordinary
-single-current-request path rather than the DDMA-isoc chain start.
+This branch is frozen for address DMA campaign configuration:
 
-Thus a DDMA-isoc request can be mapped and represented by a descriptor whose DMA
-address has been published through the descriptor ring without being represented
-by `hs_ep->req` in the same way as the ordinary path.
+```text
+PRIMARY-A
+  g_dma      = 1
+  g_dma_desc = 0
+```
 
-### Dequeue path
+Whether USB reset itself quiesces in-flight DMA remains `K_hw = UNKNOWN`.
 
-`dwc2_hsotg_ep_dequeue()` first checks only whether the request is on
-`hs_ep->queue`, then decides whether to call the stop primitive using:
+## PRIMARY-B — DDMA isochronous dequeue
+
+This is a separate campaign branch. It does not replace PRIMARY-A and inherits no
+runtime evidence from it.
+
+Required configuration/reachability:
+
+```text
+g_dma_desc = 1
+endpoint   = isochronous
+chain_started = yes
+```
+
+The chain-start condition must be real, not inferred merely from queueing. Source
+starts/rebuilds DDMA-isoc through the NAK / OUTTKNEPDIS synchronization handlers;
+`ep_queue()` only appends directly to an existing chain once
+`target_frame != TARGET_FRAME_INITIAL`.
+
+### A — descriptor remains software-published
+
+Source establishes:
+
+```text
+dwc2_gadget_fill_isoc_desc()
+  desc->buf = request DMA address
+  desc->status = HREADY
+
+dwc2_gadget_start_isoc_ddma()
+  writes desc_list_dma -> DIEPDMA/DOEPDMA
+  sets EPENA | CNAK
+```
+
+Software does not transition that descriptor from `HREADY` to `DMADONE`.
+`dwc2_gadget_complete_isoc_request_ddma()` reads descriptor status and only
+processes entries already reported `DMADONE` by the controller.
+
+Therefore:
+
+```text
+A = SOURCE-PROVEN
+software leaves HREADY + ring published + EPENA
+```
+
+Whether the controller has fetched, owns, or will fetch the descriptor in a
+particular execution remains a `K_hw/runtime` question.
+
+### B — no software retirement/rewrite before or after U in dequeue completion
+
+`ep_dequeue()` flows to `dwc2_hsotg_complete_request()`. Inside completion:
+
+```text
+U
+-> bounce completion if any
+-> hs_ep->req = NULL
+-> list_del_init(request)
+-> giveback
+-> if DDMA && isochronous: return
+```
+
+No statement in this path clears the descriptor buffer address, rewrites its
+status, advances `next_desc`, advances `compl_desc`, or rebuilds the DDMA ring.
+The descriptor therefore retains the DMA address that has just been unmapped from
+the request lifecycle.
+
+```text
+B = SOURCE-PROVEN
+no software descriptor retirement / rewrite on the dequeue -> U path
+```
+
+### Enabler — zero-offset embedded request, with object boundary preserved
+
+`struct dwc2_hsotg_req` has `struct usb_request req` as its first member, so:
+
+```text
+offsetof(struct dwc2_hsotg_req, req) == 0
+```
+
+DDMA-isoc chain publication does not go through the ordinary
+`dwc2_hsotg_start_req()` assignment of `hs_ep->req = hs_req`.
+
+The stop condition in `ep_dequeue()` is:
 
 ```c
 if (req == &hs_ep->req->req)
     dwc2_hsotg_ep_stop_xfr(...);
-
-/* unconditional after that condition */
-dwc2_hsotg_complete_request(...);
 ```
 
-`complete_request()` then reaches the unique `U` site. In DDMA isochronous mode it
-returns after giveback and does not contain a software descriptor-retirement or
-ring-rebuild operation before `U`.
+When `hs_ep->req == NULL`, this is a null-derived member-address expression. The
+zero member offset explains why common target code generation can reduce the
+comparison to a NULL/address comparison with no memory load. However, source-level
+C alone does not prove that concrete code generation, because the expression lies
+across a C undefined-behavior boundary.
 
-Normal DDMA-isoc completion is different: `dwc2_gadget_complete_isoc_request_ddma()`
-processes only descriptors whose buffer status has become `DMADONE` and only then
-completes/gives back the queue head.
-
-### Why this is not yet an L2.5 survivor
-
-If `hs_ep->req` is NULL, the expression:
-
-```c
-&hs_ep->req->req
-```
-
-is a null-derived member-address expression in C. `req` is the first member of
-`struct dwc2_hsotg_req`, so a particular compiler may reduce the comparison to an
-address/NULL comparison without an actual load, but that result must **not** be
-assumed source-side because the C expression crosses an undefined-behavior
-boundary.
-
-Therefore the next mandatory artifact is the exact target object's generated code
-for `dwc2_hsotg_ep_dequeue()` under the campaign compiler/configuration.
+Therefore the practical statement:
 
 ```text
-OBJECT_GATE success:
-    generated code does not dereference NULL to obtain the embedded req address
-    and the DDMA-isoc case skips ep_stop_xfr before complete_request/U
-
-OBJECT_GATE failure:
-    compiler emits a faulting/load-dependent path or otherwise invalidates the
-    proposed skip-stop execution
+NULL hs_ep->req -> comparison false -> stop silently skipped
 ```
 
-Even after OBJECT_GATE success, descriptor ownership/fetchability at the dequeue
-edge remains a runtime/databook question. Source proves descriptor publication and
-absence of software descriptor retirement before `U`; it does not prove that the
-controller had not already changed `HREADY` to `DMADONE` or otherwise consumed the
-descriptor in the particular execution.
+remains gated on the exact campaign object/disassembly.
 
-Current status:
+```text
+OBJECT_GATE PASS
+  generated ep_dequeue code performs no faulting member load and reaches
+  complete_request/U with the stop skipped in this DDMA-isoc state
+
+OBJECT_GATE FAIL
+  generated code invalidates that execution model
+```
+
+### PRIMARY-B status
 
 ```text
 DDMA_ISOC_DEQUEUE_PROGRAMMED
-mapping                         SOURCE-PROVEN
-software descriptor publication SOURCE-PROVEN
-ring base publication + EPENA    SOURCE-PROVEN
-software descriptor retirement before U  NOT OBSERVED IN PATH
-skip-stop execution              COMPILER/OBJECT GATE
-hardware ownership at U          UNKNOWN
-post-U DMA                       NOT PROVEN
+mapping                              SOURCE-PROVEN
+descriptor HREADY publication        SOURCE-PROVEN
+ring publication + EPENA             SOURCE-PROVEN
+A: software leaves descriptor live   SOURCE-PROVEN
+B: no retirement/rewrite around U    SOURCE-PROVEN
+offsetof(req) == 0                    SOURCE-PROVEN
+silent skip-stop execution            OBJECT_GATE
+hardware ownership/fetchability at U UNKNOWN / K_hw
+post-U DMA                            NOT PROVEN
 ```
+
+PRIMARY-B is therefore **source-qualified** and is the second primary campaign
+branch, but the exact silent-skip execution claim must not be promoted until the
+object gate passes.
+
+## Independent identity-risk entry — DDMA descriptor/queue drift
+
+This is not folded into the post-unmap claim.
+
+Normal DDMA-isoc completion associates the current descriptor index
+`hs_ep->compl_desc` with `get_ep_head(hs_ep)`. A dequeue removes one request from
+the software queue via `list_del_init()`, while the dequeue path does not adjust
+`compl_desc` and does not retire the corresponding descriptor.
+
+For a dequeue that is not naturally aligned with the next completion index, the
+software queue head and descriptor index can diverge. A later hardware `DMADONE`
+may therefore be interpreted against a different request than the request whose DMA
+address the descriptor originally carried.
+
+Status:
+
+```text
+DDMA_DESC_QUEUE_IDENTITY_DRIFT
+source asymmetry       SOURCE-PROVEN
+concrete misassociation REACHABILITY NOT YET PROVEN
+security impact        UNKNOWN
+```
+
+G4 must not infer `same_mapping_identity` from queue position or `compl_desc`
+alone. Any DDMA-isoc runtime witness must bind descriptor identity, request
+identity, mapping identity, and dequeue sequence explicitly.
 
 ## FunctionFS unaligned-bounce hypothesis — DEAD
 
-The DWC2-local unaligned-buffer helper cannot be driven merely by choosing an
-unaligned userspace address through standard FunctionFS:
+Standard FunctionFS does not expose an unaligned userspace address as
+`usb_request->buf`: non-SG I/O uses a kernel `kmalloc` buffer; SG I/O uses
+`req->buf = NULL`. Therefore:
 
 ```text
-f_fs.c: ffs_alloc_buffer()
-    non-SG -> kmalloc(data_len, GFP_KERNEL)
-    SG     -> req->buf = NULL; req->sg = ...
-
-f_fs.c: ffs_epfile_io()
-    req->buf = kernel `data`, not the userspace iterator address
+FunctionFS -> DWC2 local unaligned bounce = DEAD
 ```
 
-The non-SG `kmalloc` object has kernel allocator alignment sufficient for the
-DWC2 `(long)req_buf & 3` test; the SG path does not present a non-NULL `req->buf`.
-Therefore:
+## u_ether convenience candidate — G2.5 only
 
-```text
-unaligned-bounce via standard FunctionFS = KILLED_BY_SOURCE
-```
-
-Do not use this path for the G6 canary.
-
-## u_ether bounce candidate — retained, G2.5 only
-
-`drivers/usb/gadget/function/u_ether.c` contains an architecture- and UDC-dependent
-convenience candidate. It is not a board-admission predicate and is not required
-for G6.
-
-G2.5 carries the exact derived fields:
+The exact predicate carried by G2.5 is:
 
 ```text
 effective_net_ip_align
@@ -348,31 +353,28 @@ stock_u_ether_canary_shortcut  = yes | no
 custom_gadget_canary_feasible  = yes | no
 ```
 
-The stock shortcut requires both a modulo-4 unaligned effective offset and the
-absence of the UDC's `quirk_avoids_skb_reserve`. Failure of that shortcut does not
-block a new-epoch custom gadget canary.
-
-The topology fields that precede canary interpretation remain:
-
-```text
-dma_path                    direct | bounce(SWIOTLB) | iommu
-dma_coherent                yes | no
-cache_maintenance_at_unmap  yes | no | not-applicable
-driver_local_bounce         yes | no
-```
+Failure of the stock u_ether shortcut does not block G6; a new-epoch custom gadget
+canary remains allowed.
 
 ## Current closure state
 
 ```text
 POST-UNMAP-DMA-001
+
 L2.1 map/unmap topology       SOURCE-PROVEN
 L2.2 K_sw candidate           SOURCE-PROVEN as ATTEMPTED only
 L2.4 source-closed paths      EMPTY
-L2.5 primary survivor         USB reset -> disconnect -> U-before-stop
-L2.DDMA dequeue candidate     COMPILER/OBJECT GATE
-L2.6 databook gate            OPEN
-R1A active-at-reset           NOT PROVEN / G3
-D_issue                       NOT PROVEN
-D_commit                      NOT PROVEN
-impact                        UNKNOWN
+
+L2.5 PRIMARY-A                reset/disconnect, g_dma=1 g_dma_desc=0
+L2.5 PRIMARY-B                DDMA-isoc dequeue, g_dma_desc=1/isoc
+  A                           SOURCE-PROVEN
+  B                           SOURCE-PROVEN
+  silent skip-stop            OBJECT_GATE
+  K_hw                        OPEN
+
+identity-drift side entry     SOURCE ASYMMETRY PROVEN; reachability open
+R1A runtime                   NOT EXECUTED
+D_issue                       UNKNOWN
+D_commit                      UNKNOWN
+security impact               UNKNOWN
 ```
