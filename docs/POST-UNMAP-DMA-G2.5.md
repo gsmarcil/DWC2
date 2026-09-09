@@ -85,6 +85,74 @@ object_disassembly_available   = yes | no        # required to close PRIMARY-B s
 These do not redefine immutable `BOARD_CAPABLE`, but must be satisfied before the
 corresponding campaign target is usable.
 
+### PRIMARY-B named-target OBJECT_GATE binding
+
+The layout-matched x86-64/gcc-13.3 reproducer has closed only the generic lowering
+pattern:
+
+```text
+silent-skip codegen pattern = PATTERN-PROVEN
+scope = x86-64 / gcc 13.3 / -O2 reproducer
+```
+
+It is not target closure. For every named PRIMARY-B board, G2.5 must record:
+
+```text
+board_id
+architecture
+toolchain_id
+kernel_config_sha256
+kernel_commit
+gadget_c_sha256
+lto_enabled                    = yes | no
+debug_source_mapping           = yes | no
+object_gate_artifact           = gadget.o | vmlinux | final-module
+object_gate_artifact_sha256
+object_gate_status             = PENDING_OBJECT_GATE | OBJECT-PROVEN | KILLED | INDETERMINATE
+```
+
+Artifact selection is part of feasibility:
+
+```text
+if lto_enabled == no:
+    gadget.o is admissible
+
+if lto_enabled == yes:
+    pre-link gadget.o is inadmissible
+    require final vmlinux or the final linked module containing DWC2
+```
+
+The target gate must be built with debug/source mapping and inspected with
+source-interleaved disassembly, for example:
+
+```bash
+objdump -dS --disassemble=dwc2_hsotg_ep_dequeue <artifact>
+```
+
+The adjudication predicate is pre-registered:
+
+```text
+OBJECT-PROVEN
+  load hs_ep->req
+  -> compare pointer value with req argument
+  -> conditional branch remains
+  -> no read through hs_ep->req before comparison
+  -> NULL path skips stop and reaches complete_request/U
+
+KILLED
+  any read through hs_ep->req before comparison
+  OR comparison folded to a constant that invalidates the silent-skip model
+  OR stop sequence executes unconditionally on the NULL path
+```
+
+Do not require a literal `call dwc2_hsotg_ep_stop_xfr`: the helper is static and
+may be inlined. The stop arm may instead appear as the inlined SNAK/SGOUTNAK,
+EPDIS, and wait sequence.
+
+`PRIMARY_B_R2_ELIGIBLE` may be selected while `object_gate_status` is still pending,
+but the silent-skip execution claim must remain `PENDING_OBJECT_GATE` until the
+named target artifact reaches one of the explicit terminal verdicts above.
+
 ## C — DMA_TOPOLOGY_RESOLVED
 
 These fields must be known before interpreting a negative canary result:
@@ -119,7 +187,7 @@ PRIMARY_B_R2_ELIGIBLE =
     board supports DDMA + isoc + chain start
     && corresponding rig prerequisites ready
     && DMA topology resolved
-    && exact object/disassembly gate available
+    && exact target-object gate can be captured/adjudicated
 ```
 
 ## D — convenience / witness ranking
@@ -285,8 +353,10 @@ source/architecture convenience filter:
 DWC2 quirk audit:
     quirk_avoids_skb_reserve assignment in audited DWC2 files  NOT OBSERVED
 
-PRIMARY-A named target          NOT YET FROZEN
-PRIMARY-B named target          NOT YET FROZEN
-DMA topology                    NOT YET FROZEN
-G2.5 exit                       NOT REACHED
+PRIMARY-B codegen pattern      PATTERN-PROVEN (x86-64/gcc13.3/-O2 reproducer)
+PRIMARY-B target object        PENDING_OBJECT_GATE
+PRIMARY-A named target         NOT YET FROZEN
+PRIMARY-B named target         NOT YET FROZEN
+DMA topology                   NOT YET FROZEN
+G2.5 exit                      NOT REACHED
 ```
