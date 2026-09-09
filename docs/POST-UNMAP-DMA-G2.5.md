@@ -5,7 +5,7 @@
 G2.5 answers two distinct questions without conflating them:
 
 1. Is a named DWC2 target fundamentally capable of exercising the selected R2 path?
-2. Is the current rig/tooling ready to observe that target with admissible identity?
+2. Is the current rig/build tuple ready to observe that target with admissible identity?
 
 A board must not be rejected merely because a convenience witness (`u_ether`) or a
 particular observer has not yet been built.
@@ -17,17 +17,39 @@ A. BOARD_CAPABLE
 B. RIG_BASE_READY
 C. DMA_TOPOLOGY_RESOLVED
 ---------------------------------
-   R2-ELIGIBLE NAMED TARGET
+   R2-ELIGIBLE NAMED TARGET-BUILD
 D. CONVENIENCE / RANKING ONLY
 ```
 
 `NET_IP_ALIGN` and the stock `u_ether` bounce path belong to D. They are never an
 initial board-admission predicate.
 
+## Candidate identity — board is not enough
+
+A G2.5 row is a **target-build tuple**, not merely a board name:
+
+```text
+TARGET_BUILD_ID =
+    board_id
+    + campaign_id
+    + architecture
+    + kernel_commit
+    + toolchain_id
+    + config_hash
+```
+
+This prevents evidence transfer between two builds on the same hardware. In
+particular, PRIMARY-A and PRIMARY-B may use the same physical board after a rebuild,
+but they are still distinct target-build tuples if `g_dma_desc`, config, toolchain,
+or linked artifact differs.
+
+A single board may therefore satisfy both campaigns only as two separately bound
+rows/builds. Alternatively, two different boards may satisfy them.
+
 ## Campaign split — no evidence inheritance
 
-L2 now has two primary source survivors that require different DWC2 modes. They are
-separate campaigns and must not inherit runtime evidence from one another.
+L2 has two primary source survivors that require different DWC2 modes. They are
+separate campaigns and must not inherit runtime or object evidence from one another.
 
 ```text
 PRIMARY-A — reset/disconnect ordering
@@ -42,19 +64,24 @@ PRIMARY-B — DDMA isochronous dequeue
     chain_started = required
 ```
 
-A board may qualify for A, B, or both. G2.5 records eligibility per campaign, not
-as one global boolean that silently transfers evidence between modes.
+A board may qualify for A, B, or both. G2.5 records eligibility per campaign-build,
+not as one global boolean.
 
 ## A — BOARD_CAPABLE
 
-Immutable/controller capability fields:
+Immutable/controller capability fields are recorded before convenience ranking:
 
 ```text
 board_name
+board_id
 soc
 udc_name
 udc_driver                     = dwc2
 peripheral_gadget_mode         = reachable | unreachable
+
+supports_g_dma                 = yes | no
+supports_g_dma_desc            = yes | no
+isoc_ep_available              = yes | no
 
 primary_a_address_dma          = reachable | unreachable
 primary_a_expected_params      = g_dma=1, g_dma_desc=0
@@ -62,14 +89,25 @@ primary_a_reset_path           = reachable | unreachable
 
 primary_b_ddma                 = reachable | unreachable
 primary_b_expected_params      = g_dma=1, g_dma_desc=1
-primary_b_isoc_endpoint        = reachable | unreachable
 primary_b_chain_start          = reachable | unreachable
 ```
+
+The three capability columns below are mandatory in every candidate matrix:
+
+```text
+supports_g_dma
+supports_g_dma_desc
+isoc_ep_available
+```
+
+They are evaluated before `NET_IP_ALIGN` or any stock-canary convenience. A board
+that cannot expose the selected campaign mode is not rescued by a convenient
+unaligned-buffer path.
 
 A board is not rejected merely because only one campaign mode is available. The
 selected campaign determines which capability predicate must be satisfied.
 
-## B — RIG_BASE_READY
+## B — RIG_BASE_READY and build binding
 
 Repairable operator/rig prerequisites are recorded separately:
 
@@ -82,8 +120,35 @@ observer_build_control         = yes | no
 object_disassembly_available   = yes | no        # required to close PRIMARY-B silent-skip gate
 ```
 
-These do not redefine immutable `BOARD_CAPABLE`, but must be satisfied before the
-corresponding campaign target is usable.
+The build identity is part of the candidate row, not a later annotation:
+
+```text
+architecture
+toolchain_id
+config_hash                    = sha256(exact campaign .config)
+kernel_commit
+lto_enabled                    = yes | no
+```
+
+For a board that supports both campaigns after rebuild, the matrix records two
+campaign-specific bindings, for example:
+
+```text
+PRIMARY-A row:
+    board_id = X
+    toolchain_id = T_A
+    config_hash = C_A
+    g_dma=1, g_dma_desc=0
+
+PRIMARY-B row:
+    board_id = X
+    toolchain_id = T_B
+    config_hash = C_B
+    g_dma=1, g_dma_desc=1
+```
+
+`T_A == T_B` or `C_A == C_B` must never be assumed. Evidence is scoped to the exact
+row that produced it.
 
 ### PRIMARY-B named-target OBJECT_GATE binding
 
@@ -95,13 +160,13 @@ silent-skip codegen pattern = PATTERN-PROVEN
 scope = x86-64 / gcc 13.3 / -O2 reproducer
 ```
 
-It is not target closure. For every named PRIMARY-B board, G2.5 must record:
+It is not target closure. For every named PRIMARY-B target-build, G2.5 must record:
 
 ```text
 board_id
 architecture
 toolchain_id
-kernel_config_sha256
+config_hash
 kernel_commit
 gadget_c_sha256
 lto_enabled                    = yes | no
@@ -119,7 +184,7 @@ if lto_enabled == no:
 
 if lto_enabled == yes:
     pre-link gadget.o is inadmissible
-    require final vmlinux or the final linked module containing DWC2
+    require final vmlinux or final linked module containing DWC2
 ```
 
 The target gate must be built with debug/source mapping and inspected with
@@ -149,9 +214,9 @@ Do not require a literal `call dwc2_hsotg_ep_stop_xfr`: the helper is static and
 may be inlined. The stop arm may instead appear as the inlined SNAK/SGOUTNAK,
 EPDIS, and wait sequence.
 
-`PRIMARY_B_R2_ELIGIBLE` may be selected while `object_gate_status` is still pending,
-but the silent-skip execution claim must remain `PENDING_OBJECT_GATE` until the
-named target artifact reaches one of the explicit terminal verdicts above.
+`PRIMARY_B_R2_ELIGIBLE` may be selected while `object_gate_status` is pending, but
+the silent-skip execution claim remains `PENDING_OBJECT_GATE` until the exact
+named target-build artifact reaches a terminal verdict.
 
 ## C — DMA_TOPOLOGY_RESOLVED
 
@@ -175,24 +240,60 @@ The ordering matters:
 - A DWC2-local bounce buffer changes the object actually mapped to the controller
   and must be carried in mapping identity.
 
-Promotion is per campaign:
+Promotion is per campaign-build:
 
 ```text
 PRIMARY_A_R2_ELIGIBLE =
-    board supports address DMA/reset path
+    supports_g_dma == yes
+    && address-DMA/reset path reachable
+    && exact PRIMARY-A build binding recorded
     && corresponding rig prerequisites ready
     && DMA topology resolved
 
 PRIMARY_B_R2_ELIGIBLE =
-    board supports DDMA + isoc + chain start
+    supports_g_dma == yes
+    && supports_g_dma_desc == yes
+    && isoc_ep_available == yes
+    && DDMA chain-start path reachable
+    && exact PRIMARY-B build binding recorded
     && corresponding rig prerequisites ready
     && DMA topology resolved
     && exact target-object gate can be captured/adjudicated
 ```
 
+## Candidate matrix schema
+
+Every enumerated target should be represented with at least these columns before
+ranking:
+
+| Field | Meaning |
+|---|---|
+| `board_id` | stable physical-board identity |
+| `soc` | SoC/controller identity |
+| `arch` | target architecture |
+| `supports_g_dma` | address DMA capability |
+| `supports_g_dma_desc` | DDMA capability |
+| `isoc_ep_available` | usable isochronous endpoint |
+| `primary_a_reset_path` | host-triggerable reset/disconnect path |
+| `primary_b_chain_start` | reachable NAK/OUTTKNEPDIS DDMA-isoc start |
+| `kernel_control` | exact kernel rebuild/control available |
+| `dtb_control` | device-tree control available |
+| `dma_path` | direct / SWIOTLB / IOMMU |
+| `dma_coherent` | platform DMA coherency |
+| `toolchain_id` | exact compiler/linker tuple for this row |
+| `config_hash` | SHA256 of exact campaign config |
+| `lto_enabled` | determines admissible object artifact |
+| `campaign_id` | PRIMARY-A or PRIMARY-B |
+| `r2_eligible` | derived verdict after A+B+C |
+| `effective_net_ip_align` | convenience/ranking only |
+| `stock_u_ether_canary_shortcut` | convenience/ranking only |
+
+This schema intentionally permits two rows for one board when PRIMARY-A and
+PRIMARY-B require separate builds.
+
 ## D — convenience / witness ranking
 
-Convenience fields are evaluated only among already eligible targets:
+Convenience fields are evaluated only among already eligible target-builds:
 
 ```text
 effective_net_ip_align
@@ -262,7 +363,7 @@ Verified source values:
 
 The ARM32 row is not promoted until the exact target kernel build is preprocessed
 or compiled and the effective value is retained as a build artifact. This table
-ranks qualified boards; it does not qualify them.
+ranks qualified target-builds; it does not qualify them.
 
 ## FunctionFS filter
 
@@ -316,23 +417,23 @@ D_issue !=> D_commit
 ```
 
 For PRIMARY-B, G4 additionally must not infer mapping identity from DDMA queue
-position alone. The L2 side ledger records a descriptor-index / software-queue
-identity drift hazard after dequeue; runtime records must bind descriptor identity,
-request identity, mapping identity, and dequeue sequence explicitly.
+position alone. Runtime records must bind descriptor identity, request identity,
+mapping identity, and dequeue sequence explicitly.
 
 ## G2.5 exit
 
 Normal exit for either campaign:
 
 ```text
-at least one named target
+at least one named target-build
 && campaign-specific BOARD_CAPABLE predicate
-&& campaign-specific RIG_BASE_READY predicate
+&& campaign-specific RIG_BASE_READY/build binding
 && DMA_TOPOLOGY_RESOLVED
 => G2.5 PASS for that campaign
 ```
 
-If the enumerated target set is empty after those predicates:
+One physical board can satisfy both exits only through separately recorded
+campaign-build tuples. If no enumerated target-build satisfies a campaign:
 
 ```text
 G2.5_TARGET_SET = EMPTY
@@ -353,10 +454,19 @@ source/architecture convenience filter:
 DWC2 quirk audit:
     quirk_avoids_skb_reserve assignment in audited DWC2 files  NOT OBSERVED
 
+mandatory capability columns:
+    supports_g_dma
+    supports_g_dma_desc
+    isoc_ep_available
+
+mandatory build-binding columns:
+    toolchain_id
+    config_hash
+
 PRIMARY-B codegen pattern      PATTERN-PROVEN (x86-64/gcc13.3/-O2 reproducer)
 PRIMARY-B target object        PENDING_OBJECT_GATE
-PRIMARY-A named target         NOT YET FROZEN
-PRIMARY-B named target         NOT YET FROZEN
+PRIMARY-A named target-build   NOT YET FROZEN
+PRIMARY-B named target-build   NOT YET FROZEN
 DMA topology                   NOT YET FROZEN
 G2.5 exit                      NOT REACHED
 ```
