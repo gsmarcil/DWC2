@@ -21,6 +21,7 @@ Reset/disconnect handling is a separate PRIMARY-A branch. It must not inherit th
 4. Verify host endpoint identity and device holder endpoint identity match.
 5. Run the two-arm re-arm discriminator and record whether `USBDEVFS_RESETEP` is required.
 6. Establish sensitivity from observer counters, usbmon and holder evidence.
+7. For reset/disconnect work, capture the exact controller identity (`GSNPSID` plus any integration/revision facts needed to select the correct databook) before making any hardware-contract statement.
 
 ## Per-attempt validity
 
@@ -178,7 +179,96 @@ WAIT_RETURN = NOT_REACHED
 EPDIS_RESULT = NOT_APPLICABLE
 ```
 
-These missing events are expected and do not make the instrumentation incomplete. The positive terminal kill available there is a same-lineage completion-path event before U. A branch-specific positive criterion for surviving R1A must be separately frozen before promotion; until then, reset/disconnect evidence may be `SUPPORTED`, `DEAD`, or `AMBIGUOUS`, but must not borrow the endpoint-stop `timeout_no_ack` criterion.
+These missing events are expected and do not make the instrumentation incomplete.
+
+The source ordering matters for instrumentation design: the top-level gadget IRQ handles `USBRST/RESETDET` and calls `dwc2_hsotg_disconnect()` before it later services `OEPINT/IEPINT` from the same IRQ snapshot, while the same `hsotg->lock` is held. `kill_all_requests()` clears `ep->req` before completing queued requests. Therefore a completion that is pending or becomes pending during reset/kill can be lost to a normal `XFERCOMPL_PATH` hook that dereferences `hs_ep->req` only later. The reset branch must preserve active lineage before `disconnect()`.
+
+### Databook gate: `K_hw`
+
+Do not use product pages, old Raspberry Pi source comments, or a generic DWC2 implementation as load-bearing hardware evidence. They may be retained as `WEAK_SIGNAL` only.
+
+After reading the running `GSNPSID`, select the exact controller databook/revision if obtainable and classify exactly one result:
+
+```text
+explicit text says reset terminates/quiesces pending device DMA
+    -> K_hw = TERMINATES_PENDING_DMA
+    -> RESET BRANCH = DEAD within that contract scope
+
+explicit text says reset does not terminate pending DMA,
+or requires software SNAK/disable/quiesce
+    -> K_hw = ABSENT
+    -> reset itself is not a hardware quiescence guarantee
+
+no explicit matched text
+    -> K_hw = UNDETERMINED
+    -> no evidence-ladder movement
+```
+
+`K_hw = UNDETERMINED` is expected and is not evidence for either side.
+
+### Reset-safe runtime fallback when `K_hw = UNDETERMINED`
+
+Use the measurement observer itself rather than inferring from documentation silence. The reset-capable observer must add a `reset_generation` and preserve the active eligible OUT lineage before `dwc2_hsotg_disconnect()` retires it.
+
+For that same lineage capture:
+
+```text
+PROGRAMMED.epint_generation
+RESET_ENTRY:
+  reset_generation
+  request_generation
+  mapping_generation
+  program_generation
+  epint_generation
+  raw DOEPINT
+  raw DOEPTSIZ
+
+PRE_U:
+  same lineage fields
+  raw DOEPINT
+  raw DOEPTSIZ
+
+UNMAP_DONE:
+  same lineage fields
+  raw DOEPINT
+  raw DOEPTSIZ
+```
+
+The reset observer must not write `DOEPINT`, add a stop/NAK, change IRQ ordering, or modify map/unmap behavior.
+
+Reset-specific interpretation is frozen as follows:
+
+```text
+normal same-lineage XFERCOMPL_PATH before U
+    -> R1A_DEAD
+
+RESET_ENTRY.XferCompl = 0
+and PRE_U.XferCompl = 1
+and same request/map/program generation
+and unchanged epint_generation
+    -> fresh terminal completion before U
+    -> R1A_DEAD
+
+PRE_U.XferCompl = 0
+and UNMAP_DONE.XferCompl = 1
+and same request/map/program generation
+and unchanged epint_generation
+    -> RESET_POST_U_COMPLETION_PROGRESS
+    -> positive evidence that software unmapped before the controller's terminal completion signal
+    -> eligible for the reset-specific R1A promotion predicate
+    -> NOT D_issue and NOT D_commit by itself
+
+DOEPTSIZ changes across PRE_U -> UNMAP_DONE without the fresh XferCompl transition
+    -> SUPPORT only
+
+no post-reset progress observed
+    -> NOT_OBSERVED for this configuration
+    -> does not prove reset globally quiesces DMA
+```
+
+If `XferCompl` is already high at `RESET_ENTRY`, do not call it fresh merely because it is high. Without an independently attributable completion-path witness, classify the attempt `AMBIGUOUS` unless a stricter lineage rule frozen before the run can prove that the assertion arose after the current `PROGRAMMED` handoff.
+
+The added reset-entry MMIO snapshots delay U slightly and therefore bias against observing an unfinished transfer at U rather than creating one; nevertheless the observer must record that overhead and never describe the instrumented timing as identical to an uninstrumented kernel.
 
 ## R1A_DEAD
 
@@ -200,7 +290,7 @@ or:
 EPDIS_RESULT == timeout_then_ack_before_U
 ```
 
-For reset/disconnect, same-lineage completion before U is the currently frozen positive terminal kill.
+For reset/disconnect, `R1A_DEAD` is produced by an exact matched-databook `K_hw = TERMINATES_PENDING_DMA` guarantee, a normal same-lineage completion-path event before U, or a reset-safe fresh `XferCompl` transition before U under complete lineage/no-handler/no-reprogram controls.
 
 This symmetry is mandatory. If the observer cannot distinguish PROVEN from DEAD under the frozen rules, the result is `R1A_AMBIGUOUS` and cannot be promoted.
 
@@ -230,6 +320,7 @@ records[S1.count:S2.count]
 - Foreign matching controls/teardowns make the batch ineligible.
 - `lost > 0`, non-atomic snapshots, reset-generation changes, witness mismatch or epoch mismatch all fail closed.
 - stale PRE `EPDISBLD`, any unattributed W1C clear between PRE and RESULT, changed `epint_generation` in `WAIT_RETURN -> PRE_U`, missing completion-path coverage, or lineage mismatch makes the linked attempt ambiguous.
+- on reset/disconnect, failure to preserve the active lineage before `disconnect()` or ambiguity about a pending `XferCompl` makes the attempt ineligible for promotion.
 
 ## Required artifacts
 
@@ -246,6 +337,7 @@ records[S1.count:S2.count]
 - any observed W1C clear event between PRE and RESULT;
 - four-state `EPDIS_RESULT`;
 - `UNMAP_BEGIN` / `UNMAP_DONE` for the same lineage;
+- reset branch: exact `GSNPSID`, selected databook identity/result, `K_hw`, `reset_generation`, `RESET_ENTRY`, reset-safe `PRE_U`, and reset-safe `UNMAP_DONE` raw `DOEPINT`/`DOEPTSIZ`;
 - exact image/tool hashes and epoch block;
 - final gate JSON and generated verdict;
 - SHA256 for every artifact.
@@ -261,6 +353,15 @@ Before any hardware epoch, the measurement patch must pass all six checks:
 4  no hidden endpoint re-programming
 5  no new runtime claim encoded in instrumentation
 6  no change in natural wait timing/cadence/iteration semantics
+```
+
+For reset-capable instrumentation, add these fail-closed checks without renumbering the base six:
+
+```text
+RESET-A  active request lineage is captured before disconnect/kill
+RESET-B  no SNAK/EPDIS/quiesce action is added by measurement
+RESET-C  reset IRQ ordering is unchanged
+RESET-D  UNMAP_DONE register snapshot occurs only after the real unmap returns
 ```
 
 Failure of any item blocks the instrument regardless of whether it compiles.
