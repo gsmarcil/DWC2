@@ -46,6 +46,20 @@ jobs:
       - name: Upgrade observer to v2 discriminators
         run: python3 .github/scripts/prehw_instr_v2.py
 
+      - name: Normalize generated indentation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          g = Path('linux/drivers/usb/dwc2/gadget.c')
+          s = g.read_text()
+          a = s.index('static void dwc2_r1_measure_reset(struct dwc2_hsotg_req *hs_req)')
+          b = s.index('/**\n * dwc2_gadget_incr_frame_num', a)
+          s = s[:a] + s[a:b].replace('\\t', '\t') + s[b:]
+          g.write_text(s)
+          t = Path('linux/drivers/usb/dwc2/trace-r1.h')
+          t.write_text(t.read_text().replace('\\t', '\t'))
+          PY
+
       - name: Semantic fail-closed checks
         run: |
           set -euxo pipefail
