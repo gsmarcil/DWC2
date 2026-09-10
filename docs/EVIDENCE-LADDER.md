@@ -112,6 +112,7 @@ reset_generation
 request_generation
 mapping_generation
 program_generation
+endpoint
 epint_generation
 raw DOEPINT
 raw DOEPTSIZ
@@ -123,7 +124,7 @@ The measurement code remains read-only with respect to `DOEPINT` and must not re
 
 #### Mandatory reset transition controls
 
-A campaign `0 -> 1` `XferCompl` transition is discriminating only when **both** negative-control classes have passed in the same frozen controller/observer configuration:
+A campaign `0 -> 1` `XferCompl` transition is discriminating only when **both** negative-control classes are valid and pass in the same frozen controller/observer configuration:
 
 ```text
 CTRL-IDLE / idle-reset
@@ -132,22 +133,25 @@ CTRL-IDLE / idle-reset
 
 CTRL-COMPLETED / completed-then-reset
     matching OUT transfer has a positive natural completion witness
+    RESET_ENTRY.XferCompl = 0
     reset follows after a recorded, pre-frozen interval
-    purpose: detect delayed/stale completion reporting from a transfer
-             that was already complete before reset
+    purpose: prove the completion bit was already cleared before reset,
+             then test whether reset/re-reporting can create a new 0 -> 1
 
 CAMPAIGN-LIVE / live-then-reset
     matching OUT transfer is positively outstanding at RESET_ENTRY
     purpose: test the surviving reset branch
 ```
 
-For `CTRL-COMPLETED`, `XferCompl` high at `RESET_ENTRY` is the direct expected signature when the bit has not already been naturally W1C-serviced. It is **not** made an unconditional validity requirement, because the ordinary endpoint-interrupt path may legitimately clear a completed transfer before the later reset. The fail-closed discriminator is stronger: if an already-completed control can show `RESET_ENTRY.XferCompl=0` followed by a new `0 -> 1` assertion after reset, then the same transition in `CAMPAIGN-LIVE` is non-discriminating and is `R1A_AMBIGUOUS`, not promotion evidence. Likewise, any post-reset `0 -> 1` in `CTRL-IDLE` kills the transition as an attribution discriminator.
+`CTRL-COMPLETED` is **valid only** when both the positive pre-reset completion witness and `RESET_ENTRY.XferCompl=0` are observed for the calibrated attempt. If `XferCompl` is still high at `RESET_ENTRY`, or the prior natural completion witness is missing, that arm did not exercise the required cleared-before-reset condition: classify it `CONTROL_INVALID`, recalibrate/repeat it, and do not call it clean. A valid `CTRL-COMPLETED` that later shows a new post-reset `0 -> 1` proves that the transition is non-discriminating; the same transition in `CAMPAIGN-LIVE` is then `R1A_AMBIGUOUS`. Likewise, any post-reset `0 -> 1` in a valid `CTRL-IDLE` kills the transition as an attribution discriminator.
 
-Control counts, the completed-to-reset interval, and the exact host completion witness must be frozen before the campaign; they are not chosen after seeing campaign output.
+The campaign arm may not begin or be promoted until both controls have produced valid attempts under their frozen predicates. An invalid control is not a negative result and must stop promotion rather than being counted as clean. Control counts, the completed-to-reset interval, and the exact host completion witness must be frozen before the campaign; they are not chosen after seeing campaign output.
 
-A fresh same-lineage `XferCompl` transition observed before U is terminal and yields `R1A_DEAD` for that attempt. For reset-safe register attribution, a transition is considered fresh only when the earlier snapshot had `XferCompl` clear, the later snapshot has it set, request/map/program generations are unchanged, and no endpoint-interrupt-handler entry or re-programming occurred between the two snapshots. A bit already high at the first reset snapshot is not silently treated as fresh; without an independently attributable completion-path event it is `AMBIGUOUS`.
+A fresh same-lineage `XferCompl` transition observed before U is terminal and yields `R1A_DEAD` for that attempt. For reset-safe register attribution, a transition is considered fresh only when the earlier snapshot had `XferCompl` clear, the later snapshot has it set, request/map/program generations **and endpoint** are unchanged, and no endpoint-interrupt-handler entry or re-programming occurred between the two snapshots. A bit already high at the first reset snapshot is not silently treated as fresh; without an independently attributable completion-path event it is `AMBIGUOUS`.
 
-If `XferCompl` is clear at `PRE_U` and becomes set only at `UNMAP_DONE`, with the same lineage and no intervening endpoint handler/re-programming, the observer has proved **post-U controller completion progress for that programmed transfer**. This may support the reset-specific R1A predicate that software unmapped before the controller's terminal completion signal, but it does not by itself prove that an OUT memory write occurred after U. A `DOEPTSIZ` delta across `PRE_U -> UNMAP_DONE` is supporting context only and is never promoted alone to `D_issue` or `D_commit`.
+`PRE_U` and `UNMAP_DONE` must be joined by the full tuple `{reset_generation, request_generation, mapping_generation, program_generation, endpoint}`. Temporal adjacency alone is never a join key: `kill_all_requests()` can process other endpoints under the same lock, and events from another endpoint must not be spliced into the candidate lineage.
+
+If `XferCompl` is clear at `PRE_U` and becomes set only at `UNMAP_DONE`, with the same full lineage tuple and no intervening endpoint handler/re-programming, the observer has proved **post-U controller completion progress for that programmed transfer**. This may support the reset-specific R1A predicate that software unmapped before the controller's terminal completion signal, but it does not by itself prove that an OUT memory write occurred after U. A `DOEPTSIZ` delta across `PRE_U -> UNMAP_DONE` is supporting context only and is never promoted alone to `D_issue` or `D_commit`.
 
 If no post-reset progress is observed, the result is `NOT_OBSERVED` for that configuration; it does not prove that reset globally quiesces DMA.
 
@@ -190,7 +194,7 @@ The following are supporting signals but are insufficient alone:
 
 - `DXEPCTL_EPENA` still set near U: the bit may be stale.
 - no completion-path witness before U when event completeness is not independently established.
-- positive residual `DOEPTSIZ.XFRSIZ`.
+- positive residual `DOEPTSIZ.XFERSIZE`.
 - PRE/RESULT `XFRSIZ` delta.
 - a stop timeout without the full fresh-ack and lineage controls.
 - a `timeout_no_ack` observation whose `WAIT_RETURN -> PRE_U` interval is not proven clean of endpoint-interrupt-handler entries.
