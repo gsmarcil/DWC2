@@ -40,57 +40,112 @@ Host completion status after the trigger is not used as a validity filter.
 
 ## R1A load-bearing observation set
 
-The observer must bind every load-bearing sample to explicit `request_id` and monotonically increasing `mapping_generation`. DMA address equality is diagnostic only and never substitutes for generation identity.
-
-For the active OUT request, capture before the endpoint-disable action:
+Every load-bearing event must carry explicit lineage:
 
 ```text
-DOEPCTL        including EPENA
-DOEPINT        including XferCompl and EPDISBLD state
-DOEPTSIZ       including residual XFRSIZ
-request_id
+request_generation
 mapping_generation
+program_generation
+endpoint
 ```
 
-Then record the endpoint-disable action and whether a **fresh** `EPDISBLD` acknowledgement occurs. A level that was already set in the pre-disable snapshot is not a fresh acknowledgement.
+`mapping_generation` increments at each successful map. `program_generation` is separate and increments each time the active OUT request is programmed into the endpoint/DMA state for that lineage. `dma_addr` is diagnostic only.
 
-### PROVEN
+### Measurement path must not modify DOEPINT
 
-A linked attempt may be classified `R1A_PROVEN` only when all frozen conditions in `EVIDENCE-LADDER.md` hold, including:
+`DXEPINT_EPDISBLD` is W1C. The measurement code is read-only with respect to `DOEPINT`; it must never clear or set that register merely to observe it.
+
+Immediately before the existing driver EPDIS write, record `EPDIS_ASSERT` with raw:
 
 ```text
-MAP -> PROGRAMMED for same request/map generation
-pre-stop EPENA == 1
-pre-stop residual XFRSIZ > 0
-no same-request XferCompl before U
-EPDISBLD clear before EPDIS assertion
-natural wait for fresh EPDISBLD times out
-UNMAP_BEGIN -> UNMAP_DONE on same mapping generation
-no intervening re-programming
+DOEPCTL
+DOEPINT
+DOEPTSIZ
+request_generation
+mapping_generation
+program_generation
+```
+
+Any existing driver-side W1C clear of `EPDISBLD` between this PRE observation and the RESULT observation must be observed/attributed. If such a clear occurs and cannot itself be tied to a positive terminal result for the same lineage, the attempt is `R1A_AMBIGUOUS`.
+
+### Completion witness is the completion path, not a register absence
+
+Do not use a late read of `DOEPINT.XferCompl` to prove absence of completion. The load-bearing witness is an event emitted on the same request's completion path with request/mapping/program lineage attached.
+
+A same-lineage completion-path event before U is terminal and yields `R1A_DEAD` for that attempt. Absence is usable only if the completion event stream is complete and `lost == 0`.
+
+### XFRSIZ is supporting context only
+
+Capture `DOEPTSIZ.XFERSIZE` both before EPDIS and at RESULT. The value is asynchronous to controller progress and may remain positive after a short OUT transfer is effectively complete. Store:
+
+```text
+xfrsiz_pre
+xfrsiz_result
+xfrsiz_delta = xfrsiz_pre - xfrsiz_result
+```
+
+No single value or positive residual is a proof condition.
+
+## Four-state EPDIS_RESULT
+
+The observer must classify the endpoint-disable result as exactly one of:
+
+```text
+fresh_ack
+timeout_then_ack_before_U
+timeout_no_ack
+ambiguous
+```
+
+Definitions:
+
+- `fresh_ack`: `EPDISBLD` was known clear immediately before EPDIS and a fresh assertion is observed before the natural wait deadline and before U.
+- `timeout_then_ack_before_U`: the driver's natural wait timed out, but a fresh assertion is observed after the timeout and before U.
+- `timeout_no_ack`: the natural wait timed out and no fresh assertion is observed before U.
+- `ambiguous`: stale-high PRE state, intervening/unattributed W1C clear, generation mismatch, event loss, or any inability to distinguish a fresh assertion.
+
+Both `fresh_ack` and `timeout_then_ack_before_U` kill R1A for that linked attempt. A warning emitted by the driver's timeout path is therefore never classified as R1A success without checking for a late acknowledgement before U.
+
+## R1A_PROVEN
+
+A linked PRIMARY-A attempt may be classified `R1A_PROVEN` only when all frozen conditions in `EVIDENCE-LADDER.md` hold, including:
+
+```text
+MAP -> PROGRAMMED for one lineage
+host Bulk OUT outstanding at trigger
+request_generation unchanged
+mapping_generation unchanged
+program_generation unchanged after the load-bearing PROGRAMMED event
+EPDISBLD clear immediately before EPDIS
+EPDIS_RESULT == timeout_no_ack
+no same-lineage completion-path event before U
+UNMAP_BEGIN -> UNMAP_DONE on the same lineage
+no intervening map or endpoint re-program event
 lost == 0
 ```
 
-This classification means software proceeded to unmap an incompletely transferred same-generation request without a fresh positive controller acknowledgement that endpoint disable completed. It is not a direct hardware-ownership bit and must not be described as one.
+`EPENA`, `xfrsiz_pre`, `xfrsiz_result`, and `xfrsiz_delta` are recorded as SUPPORT only.
 
-### SUPPORTED only
+This classification means software proceeded to unmap the same request/mapping/program lineage without an observed same-lineage completion and without a fresh positive controller acknowledgement that endpoint disable completed. It is not a direct hardware-ownership bit and must not be described as one.
 
-`EPENA=1`, no `XferCompl`, residual `XFRSIZ`, or a timeout may each support R1A, but none is sufficient alone. A pre-set/stale `EPDISBLD` makes the acknowledgement path ambiguous.
+## R1A_DEAD
 
-### DEAD
-
-A linked attempt is `R1A_DEAD` if a positive terminal condition is observed before U:
+A linked attempt is `R1A_DEAD` if either positive terminal condition occurs before U:
 
 ```text
-same-request XferCompl before U
+same-lineage completion-path event
 ```
 
-or
+or:
 
 ```text
-EPDISBLD was clear before EPDIS assertion
-AND a fresh EPDISBLD transition is observed after EPDIS assertion
-AND before U
-AND no intervening re-programming/map generation occurred
+EPDIS_RESULT == fresh_ack
+```
+
+or:
+
+```text
+EPDIS_RESULT == timeout_then_ack_before_U
 ```
 
 This symmetry is mandatory. If the observer cannot distinguish PROVEN from DEAD under the frozen rules, the result is `R1A_AMBIGUOUS` and cannot be promoted.
@@ -120,7 +175,7 @@ records[S1.count:S2.count]
 - Any attempt that fired the campaign trigger but is invalid makes the batch unusable for negative aggregation unless attribution proves it contributed no candidate.
 - Foreign matching controls/teardowns make the batch ineligible.
 - `lost > 0`, non-atomic snapshots, reset-generation changes, witness mismatch or epoch mismatch all fail closed.
-- A stale pre-existing `EPDISBLD`, missing pre-stop register snapshot, or missing request/map identity makes the linked attempt ambiguous.
+- stale PRE `EPDISBLD`, any unattributed W1C clear between PRE and RESULT, missing completion-path coverage, or lineage mismatch makes the linked attempt ambiguous.
 
 ## Required artifacts
 
@@ -128,9 +183,13 @@ records[S1.count:S2.count]
 - campaign-only usbmon capture;
 - holder event log with session and boot identity;
 - host harness log / manifest;
-- per-attempt `request_id` + `mapping_generation` lineage;
-- pre-stop `DOEPCTL` / `DOEPINT` / `DOEPTSIZ` snapshot;
-- fresh-vs-stale endpoint-disable acknowledgement result;
+- per-attempt request/mapping/program lineage;
+- `EPDIS_ASSERT` raw `DOEPCTL` / `DOEPINT` / `DOEPTSIZ`;
+- completion-path events for the linked request;
+- PRE/RESULT `XFRSIZ` plus delta;
+- any observed W1C clear event between PRE and RESULT;
+- four-state `EPDIS_RESULT`;
+- `UNMAP_BEGIN` / `UNMAP_DONE` for the same lineage;
 - exact image/tool hashes and epoch block;
 - final gate JSON and generated verdict;
 - SHA256 for every artifact.
@@ -139,6 +198,6 @@ records[S1.count:S2.count]
 
 `R1A_PROVEN` closes only the observable PRIMARY-A statement defined above for its linked attempt. It does not by itself prove real post-U device access, `D_issue`, `D_commit`, or security impact.
 
-`UNMAP_DONE` is an observation point. `same_mapping_generation` and `NO_REMAP` are attribution controls. They are not vertical proof steps.
+`UNMAP_DONE` is an observation point. `same_mapping_generation`, `same program_generation`, and `NO_REMAP` are attribution controls. They are not vertical proof steps.
 
 PRIMARY-B (`dequeue` on isochronous DDMA) is a separate campaign with separate trigger/preconditions and does not inherit PRIMARY-A evidence.
