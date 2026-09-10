@@ -1,0 +1,272 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] usb: dwc2: add gated R1 linear DMA lifetime tracepoints
+
+Measurement-only patch for the pinned DWC2 tree.  It does not change transfer
+ordering or error handling.  When CONFIG_USB_DWC2_R1_MEASURE=n the request
+layout and gadget path are unchanged.
+
+The first campaign is deliberately restricted to non-EP0 Bulk OUT requests in
+buffer-DMA mode, with a core-owned LINEAR mapping and no DWC2 alignment bounce.
+SWIOTLB/IOMMU classification remains a separate topology measurement.
+
+Each admitted queue instance gets a request generation and mapping generation.
+The trace records MAP, PROGRAMMED, UNMAP_BEGIN and UNMAP_DONE for the same saved
+DMA address/length.  UNMAP_DONE is emitted only after dwc2_hsotg_unmap_dma()
+returns and before giveback, so a later temporal-sentinel observation can bind
+to the exact retired mapping without using raw kernel pointers.
+---
+ drivers/usb/dwc2/Kconfig   | 12 ++++++
+ drivers/usb/dwc2/core.h    |  8 ++++
+ drivers/usb/dwc2/gadget.c  | 92 ++++++++++++++++++++++++++++++++++++++++++++--
+ drivers/usb/dwc2/trace-r1.h| 72 ++++++++++++++++++++++++++++++++++++
+ 4 files changed, 181 insertions(+), 3 deletions(-)
+ create mode 100644 drivers/usb/dwc2/trace-r1.h
+
+diff --git a/drivers/usb/dwc2/Kconfig b/drivers/usb/dwc2/Kconfig
+index d7af55a8e..111111111 100644
+--- a/drivers/usb/dwc2/Kconfig
++++ b/drivers/usb/dwc2/Kconfig
+@@ -85,6 +85,18 @@ config USB_DWC2_TRACK_MISSED_SOFS
+ 	  WARNING: This feature is still experimental.
+ 	  If in doubt, say N.
+ 
++config USB_DWC2_R1_MEASURE
++	bool "Enable DWC2 R1 DMA lifetime tracepoints"
++	depends on TRACING
++	default n
++	help
++	  Enable measurement-only tracepoints for the DWC2 R1 DMA lifetime
++	  experiment.  The first campaign admits only non-EP0 Bulk OUT requests
++	  using address/buffer DMA, a core-owned linear mapping, and no DWC2
++	  alignment bounce.  It records mapping/programming/unmap ordering and
++	  stable request/map generations; it does not assert a post-unmap DMA
++	  issue or memory effect.  Say N for normal kernels.
++
+ config USB_DWC2_DEBUG_PERIODIC
+ 	bool "Enable Debugging Messages For Periodic Transfers"
+ 	depends on USB_DWC2_DEBUG || USB_DWC2_VERBOSE
+diff --git a/drivers/usb/dwc2/core.h b/drivers/usb/dwc2/core.h
+index 767251aa1..222222222 100644
+--- a/drivers/usb/dwc2/core.h
++++ b/drivers/usb/dwc2/core.h
+@@ -151,6 +151,14 @@ struct dwc2_hsotg_req {
+ 	struct usb_request      req;
+ 	struct list_head        queue;
+ 	void *saved_req_buf;
++#ifdef CONFIG_USB_DWC2_R1_MEASURE
++	u64 r1_req_id;
++	u64 r1_map_id;
++	dma_addr_t r1_dma;
++	u32 r1_length;
++	bool r1_linear;
++#endif
+ };
+ 
+ #if IS_ENABLED(CONFIG_USB_DWC2_PERIPHERAL) || \
+diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
+index c8b02c27d..333333333 100644
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -20,6 +20,12 @@
+ #include <linux/io.h>
+ #include <linux/slab.h>
+ 
++#ifdef CONFIG_USB_DWC2_R1_MEASURE
++#include <linux/atomic.h>
++#define CREATE_TRACE_POINTS
++#include "trace-r1.h"
++#endif
++
+ #include <linux/usb/ch9.h>
+ #include <linux/usb/gadget.h>
+ #include <linux/usb/phy.h>
+@@ -107,6 +113,70 @@ static inline bool using_desc_dma(struct dwc2_hsotg *hsotg)
+ 	return hsotg->params.g_dma_desc;
+ }
+ 
++#ifdef CONFIG_USB_DWC2_R1_MEASURE
++static atomic64_t dwc2_r1_req_seq = ATOMIC64_INIT(0);
++static atomic64_t dwc2_r1_map_seq = ATOMIC64_INIT(0);
++
++static void dwc2_r1_measure_reset(struct dwc2_hsotg_req *hs_req)
++{
++	hs_req->r1_req_id = 0;
++	hs_req->r1_map_id = 0;
++	hs_req->r1_dma = 0;
++	hs_req->r1_length = 0;
++	hs_req->r1_linear = false;
++}
++
++static bool dwc2_r1_measure_eligible(struct dwc2_hsotg *hsotg,
++					     struct dwc2_hsotg_ep *hs_ep,
++					     struct dwc2_hsotg_req *hs_req)
++{
++	struct usb_request *req = &hs_req->req;
++
++	return using_dma(hsotg) && !using_desc_dma(hsotg) && hs_ep->index &&
++	       !hs_ep->dir_in && hs_ep->ep.desc &&
++	       usb_endpoint_xfer_bulk(hs_ep->ep.desc) && req->length &&
++	       !req->sg_was_mapped && !req->num_sgs && req->dma_mapped &&
++	       !hs_req->saved_req_buf;
++}
++
++static void dwc2_r1_measure_mapped(struct dwc2_hsotg *hsotg,
++					   struct dwc2_hsotg_ep *hs_ep,
++					   struct dwc2_hsotg_req *hs_req)
++{
++	if (!dwc2_r1_measure_eligible(hsotg, hs_ep, hs_req))
++		return;
++
++	hs_req->r1_req_id = atomic64_inc_return(&dwc2_r1_req_seq);
++	hs_req->r1_map_id = atomic64_inc_return(&dwc2_r1_map_seq);
++	hs_req->r1_dma = hs_req->req.dma;
++	hs_req->r1_length = hs_req->req.length;
++	hs_req->r1_linear = true;
++	trace_dwc2_r1_lifetime(DWC2_R1_MAP, hs_req->r1_req_id,
++			       hs_req->r1_map_id, hs_ep->index,
++			       hs_req->r1_dma, hs_req->r1_length,
++			       hs_req->req.actual, 0, hs_req->req.status,
++			       hs_req->req.dma_mapped);
++}
++
++static void dwc2_r1_measure_event(struct dwc2_hsotg_ep *hs_ep,
++				   struct dwc2_hsotg_req *hs_req,
++				   u8 stage, int result)
++{
++	if (!hs_req->r1_linear)
++		return;
++
++	trace_dwc2_r1_lifetime(stage, hs_req->r1_req_id, hs_req->r1_map_id,
++			       hs_ep->index, hs_req->r1_dma, hs_req->r1_length,
++			       hs_req->req.actual, result, hs_req->req.status,
++			       hs_req->req.dma_mapped);
++}
++#else
++static inline void dwc2_r1_measure_reset(struct dwc2_hsotg_req *hs_req) { }
++static inline void dwc2_r1_measure_mapped(struct dwc2_hsotg *hsotg,
++						  struct dwc2_hsotg_ep *hs_ep,
++						  struct dwc2_hsotg_req *hs_req) { }
++static inline void dwc2_r1_measure_event(struct dwc2_hsotg_ep *hs_ep,
++					 struct dwc2_hsotg_req *hs_req,
++					 u8 stage, int result) { }
++#endif
++
+ /**
+  * dwc2_gadget_incr_frame_num - Increments the targeted frame number.
+  * @hs_ep: The endpoint
+@@ -1169,6 +1239,9 @@ static void dwc2_hsotg_start_req(struct dwc2_hsotg *hsotg,
+ 
+ 			dwc2_writel(hsotg, ureq->dma, dma_reg);
+ 
++			dwc2_r1_measure_event(hs_ep, hs_req,
++					       DWC2_R1_PROGRAMMED, 0);
++
+ 			dev_dbg(hsotg->dev, "%s: %pad => 0x%08x\n",
+ 				__func__, &ureq->dma, dma_reg);
+ 		}
+@@ -1406,6 +1479,7 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
+ 	INIT_LIST_HEAD(&hs_req->queue);
+ 	req->actual = 0;
+ 	req->status = -EINPROGRESS;
++	dwc2_r1_measure_reset(hs_req);
+ 
+ 	/* Don't queue ISOC request if length greater than mps*mc */
+ 	if (hs_ep->isochronous &&
+@@ -1441,6 +1515,7 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
+ 		if (ret)
+ 			return ret;
++		dwc2_r1_measure_mapped(hs, hs_ep, hs_req);
+ 	}
+ 	/* If using descriptor DMA configure EP0 descriptor chain pointers */
+ 	if (using_desc_dma(hs) && !hs_ep->index) {
+@@ -2128,8 +2203,15 @@ static void dwc2_hsotg_complete_request(struct dwc2_hsotg *hsotg,
+ 	if (hs_req->req.status == -EINPROGRESS)
+ 		hs_req->req.status = result;
+ 
+-	if (using_dma(hsotg))
++	if (using_dma(hsotg)) {
++		dwc2_r1_measure_event(hs_ep, hs_req,
++				       DWC2_R1_UNMAP_BEGIN, result);
+ 		dwc2_hsotg_unmap_dma(hsotg, hs_ep, hs_req);
++		dwc2_r1_measure_event(hs_ep, hs_req,
++				       DWC2_R1_UNMAP_DONE, result);
++	}
+ 
+ 	dwc2_hsotg_handle_unaligned_buf_complete(hsotg, hs_ep, hs_req);
+ 
+diff --git a/drivers/usb/dwc2/trace-r1.h b/drivers/usb/dwc2/trace-r1.h
+new file mode 100644
+index 000000000..444444444
+--- /dev/null
++++ b/drivers/usb/dwc2/trace-r1.h
+@@ -0,0 +1,72 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM dwc2_r1
++
++#if !defined(_TRACE_DWC2_R1_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_DWC2_R1_H
++
++#include <linux/tracepoint.h>
++
++enum dwc2_r1_lifetime_stage {
++	DWC2_R1_MAP = 1,
++	DWC2_R1_PROGRAMMED = 2,
++	DWC2_R1_UNMAP_BEGIN = 3,
++	DWC2_R1_UNMAP_DONE = 4,
++};
++
++TRACE_EVENT(dwc2_r1_lifetime,
++	TP_PROTO(u8 stage, u64 req_id, u64 map_id, u8 ep_index,
++		 u64 dma_addr, u32 length, u32 actual, int result,
++		 int status, bool dma_mapped),
++
++	TP_ARGS(stage, req_id, map_id, ep_index, dma_addr, length, actual,
++		result, status, dma_mapped),
++
++	TP_STRUCT__entry(
++		__field(u8, stage)
++		__field(u64, req_id)
++		__field(u64, map_id)
++		__field(u8, ep_index)
++		__field(u64, dma_addr)
++		__field(u32, length)
++		__field(u32, actual)
++		__field(int, result)
++		__field(int, status)
++		__field(bool, dma_mapped)
++	),
++
++	TP_fast_assign(
++		__entry->stage = stage;
++		__entry->req_id = req_id;
++		__entry->map_id = map_id;
++		__entry->ep_index = ep_index;
++		__entry->dma_addr = dma_addr;
++		__entry->length = length;
++		__entry->actual = actual;
++		__entry->result = result;
++		__entry->status = status;
++		__entry->dma_mapped = dma_mapped;
++	),
++
++	TP_printk("stage=%u req=%llu map=%llu ep=%u dma=0x%llx len=%u actual=%u result=%d status=%d dma_mapped=%u",
++		  __entry->stage,
++		  (unsigned long long)__entry->req_id,
++		  (unsigned long long)__entry->map_id,
++		  __entry->ep_index,
++		  (unsigned long long)__entry->dma_addr,
++		  __entry->length, __entry->actual, __entry->result,
++		  __entry->status, __entry->dma_mapped)
++);
++
++#endif /* _TRACE_DWC2_R1_H */
++
++#undef TRACE_INCLUDE_PATH
++#define TRACE_INCLUDE_PATH .
++#undef TRACE_INCLUDE_FILE
++#define TRACE_INCLUDE_FILE trace-r1
++
++#include <trace/define_trace.h>
+-- 
+2.43.0
