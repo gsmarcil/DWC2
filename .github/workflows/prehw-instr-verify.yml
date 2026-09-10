@@ -26,16 +26,15 @@ jobs:
           git fetch --depth=1 origin f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
-      - name: Apply fail-closed instrumentation transform
+      - name: Apply-check checked-in patch
         run: |
           set -euxo pipefail
-          python3 instr/apply_r1_measure.py linux
           cd linux
+          git apply --check ../instr/0001-dwc2-r1-linear-lifetime-tracepoints.patch
+          git apply ../instr/0001-dwc2-r1-linear-lifetime-tracepoints.patch
           git diff --check
           grep -n 'CONFIG_USB_DWC2_R1_MEASURE\|DWC2_R1_UNMAP_DONE\|DWC2_R1_PROGRAMMED' drivers/usb/dwc2/{Kconfig,core.h,gadget.c,trace-r1.h}
-          git diff -- drivers/usb/dwc2/ > ../r1-measure.generated.patch
-          test -s ../r1-measure.generated.patch
-      - name: Configure measurement build
+      - name: Build with measurement disabled
         run: |
           set -euxo pipefail
           cd linux
@@ -45,19 +44,16 @@ jobs:
           scripts/config --enable USB_DWC2
           scripts/config --enable USB_DWC2_DUAL_ROLE
           scripts/config --enable TRACING
-          scripts/config --enable USB_DWC2_R1_MEASURE
-          make olddefconfig
-          grep -E '^CONFIG_(USB_DWC2|USB_DWC2_DUAL_ROLE|USB_DWC2_R1_MEASURE|TRACING)=' .config
-      - name: Build DWC2 with tracepoints enabled
-        run: |
-          set -euxo pipefail
-          cd linux
-          make -j2 drivers/usb/dwc2/
-      - name: Verify normal build excludes measurement state
-        run: |
-          set -euxo pipefail
-          cd linux
           scripts/config --disable USB_DWC2_R1_MEASURE
           make olddefconfig
           grep '^# CONFIG_USB_DWC2_R1_MEASURE is not set' .config
+          make -j2 drivers/usb/dwc2/
+      - name: Build with measurement enabled
+        run: |
+          set -euxo pipefail
+          cd linux
+          make clean
+          scripts/config --enable USB_DWC2_R1_MEASURE
+          make olddefconfig
+          grep '^CONFIG_USB_DWC2_R1_MEASURE=y' .config
           make -j2 drivers/usb/dwc2/
