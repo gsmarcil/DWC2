@@ -1,11 +1,11 @@
-# Status snapshot — 2026-09-08
+# Status snapshot — 2026-09-10
 
 ```text
 SOURCE PATH / TEARDOWN ORDER       SOURCE-PROVEN
 CURRENT REPOSITORY BASELINE        VERIFIED / CANONICAL v4.2 IMPORT
-PRE-RUNTIME TOOLCHAIN              REPRODUCIBLE / VERIFIED (RUNTIME NOT EXECUTED)
-HOLDER PRODUCER CONTRACT           BLOCKED / LEGACY SOURCE INCOMPATIBLE
-OVERALL REPOSITORY GATE            FAIL-CLOSED (EXPECTED)
+PRE-RUNTIME TOOLCHAIN              REPRODUCIBLE / VERIFIED
+HOLDER PRODUCER CONTRACT           PASS / G1 CLOSED PRE-RUNTIME
+OVERALL REPOSITORY GATE            PASS
 R1A REAL DWC2 RUNTIME              NOT EXECUTED
 REAL UNMAP IN TESTED ATTEMPT       NOT PROVEN
 D_issue                            UNKNOWN
@@ -14,18 +14,9 @@ SECURITY BOUNDARY IMPACT           UNKNOWN
 FINAL SEVERITY                     UNRESOLVED
 ```
 
-The checked-in `baseline/` directory was restored byte-for-byte from the
-independently authenticated `R1A-EVIDENCE-PIPELINE-v4.2.tar.gz` archive:
-
-```text
-archive size     303278 bytes
-archive SHA256   d1d754076039aedf9756883f972a4f77014c043a6b7c1e0e14b3ebaae01eb563
-pinned paths     89/89 matching and tracked
-```
-
-The fragment audit and closure evidence are recorded in
-[`docs/BASELINE-STATUS.md`](docs/BASELINE-STATUS.md) and
-[`docs/CANONICAL-IMPORT-RECEIPT-v4.2.md`](docs/CANONICAL-IMPORT-RECEIPT-v4.2.md).
+The checked-in `baseline/` directory remains the byte-identical canonical v4.2
+import. G1 changes the next-campaign producer/tooling around that baseline; it
+does not rewrite the authenticated baseline bytes.
 
 Repository and campaign readiness are fail-closed behind:
 
@@ -33,15 +24,32 @@ Repository and campaign readiness are fail-closed behind:
 ./VERIFY-REPOSITORY.sh
 ```
 
-The baseline portion reports `REPOSITORY_BASELINE: PASS`. The overall gate now
-exits 1 with `HOLDER_CAMPAIGN_READINESS: BLOCKED / PRODUCER INCOMPATIBLE` because
-the active `holder_merger` consumes a JSONL schema that the preserved device
-source cannot emit. Runtime was not executed by the import.
+The PREHW G1 verification built the canonical holder producer and exercised the
+full producer/consumer contract with discriminating controls. Observed result:
 
-Next actions, in order:
+```text
+holder_producer_contract           PASS
+holder_contract_selftest           PASS   2 positive, 10 fail-closed
+holder_log_guard_selftest          PASS   15/15
+holder_roundtrip                   PASS   18/18
+REPOSITORY_BASELINE                PASS
+HOLDER_CAMPAIGN_READINESS          PASS
+REPOSITORY_GATE                    PASS
+```
 
-1. obtain the original producer that emits the active holder JSONL contract;
-2. require `verify_holder_contract.py` and the overall repository gate to PASS;
-3. pin that source and its exact built harness in the next expanded epoch;
-4. import/reverify the expanded predicate set;
-5. proceed toward real DWC2 runtime qualification.
+The exact pre-holder source is retained under `r1a-device/legacy/` as a pinned
+negative control rather than being confused with the canonical producer.
+
+No runtime claim moved. G1 establishes only that the first hardware epoch will
+not be blocked by a known producer/merger schema mismatch.
+
+Next executable work, in order:
+
+1. freeze the green pre-hardware code point as `EPOCH-PREHW-1` without pretending
+   that the runtime epoch freezer can manufacture missing hardware artifacts;
+2. prepare a separate measurement-only DWC2 instrumentation branch with stable
+   request/map identity and `UNMAP_BEGIN`/`UNMAP_DONE` trace events;
+3. prepare the temporal-sentinel gadget for a possible `D_commit` measurement;
+4. build the affected-surface source matrix for maintained kernel lines and
+   relevant gadget/DMA topologies;
+5. when Pi Zero 2 W arrives, collect PI-FB1 + PI-FB2 before attempting R1A.
