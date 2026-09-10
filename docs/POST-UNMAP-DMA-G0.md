@@ -70,6 +70,41 @@ python3 tools/dma_api_debug_gate.py compare \
   artifacts/post-unmap-dma/dma-api-after
 ```
 
+## Snapshot identity / comparability contract
+
+A before/after pair is one evidence window only if the runtime identity is positively
+bound. `error_count` equality by itself is not a comparability proof.
+
+Every snapshot records at least:
+
+```text
+kernel
+boot_id              # /proc/sys/kernel/random/boot_id
+dwc2_bindings
+driver_filter
+error_count
+```
+
+Before computing a delta, `compare` must require exact equality of:
+
+```text
+kernel
+dwc2_bindings
+driver_filter
+boot_id
+```
+
+A missing/malformed identity field or any mismatch is:
+
+```text
+DMA_API_DEBUG_COMPARE: REFUSED
+rc = 2
+```
+
+This specifically prevents a reboot on the same kernel release from silently
+comparing counters from different boots. `boot_id` is load-bearing evidence; matching
+kernel strings are insufficient.
+
 ## Closure semantics
 
 ### Positive
@@ -105,10 +140,18 @@ NO_POST_UNMAP_DMA
 A clean DMA-API-debug run leaves the hardware post-unmap hypothesis active and
 permits transition to the next runtime track.
 
+## Selftest acceptance
+
+The selftest is part of the gate, not a convenience. It must include discriminating
+negative controls that keep `error_count` unchanged while changing each load-bearing
+identity field (`kernel`, `dwc2_bindings`, `driver_filter`, `boot_id`), and each such
+pair must be refused with `rc=2`. It also retains the backwards-counter control.
+
 ## G0.5 stop conditions
 
 - `BLOCKED_CONFIG` → stop; rebuild/boot a kernel with `CONFIG_DMA_API_DEBUG=y`.
 - `BLOCKED_DEBUGFS` → stop; make the debugfs interface accessible and rerun.
 - `BLOCKED_RUNTIME_DISABLED` → stop; reboot without `dma_debug=off` or investigate exhaustion.
+- snapshot identity mismatch/missing field → stop; do not compute or interpret a delta.
 - `DMA_API_MISUSE_OBSERVED` → stop custom-gadget work and analyze the warning stack.
 - `API_MISUSE_NOT_OBSERVED` with a real DWC2 exercise window → G0.5 closes cleanly and Track L2 may start.

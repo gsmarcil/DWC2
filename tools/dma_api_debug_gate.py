@@ -2,8 +2,9 @@
 """Low-cost DMA-API-debug gate for the DWC2 post-unmap DMA campaign.
 
 This tool is deliberately a *driver API misuse* gate, not a proof that hardware
-cannot DMA after unmap.  A clean result means only that CONFIG_DMA_API_DEBUG did
-not observe a DMA-API contract violation during the exercised window.
+cannot DMA after unmap. A clean result means only that CONFIG_DMA_API_DEBUG did
+not observe a DMA-API contract violation during one identity-stable exercised
+window.
 """
 from __future__ import annotations
 
@@ -30,12 +31,15 @@ DMA_API_KEYS = (
     "driver_filter",
 )
 
+COMPARABILITY_KEYS = ("kernel", "dwc2_bindings", "driver_filter", "boot_id")
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 WARN_RE = re.compile(r"DMA-API|check_unmap|debug_dma_|dma[_ -]api", re.I)
 
 
 @dataclass
 class Probe:
     kernel: str
+    boot_id: Optional[str]
     config_path: Optional[str]
     config_dma_api_debug: Optional[str]
     config_debug_fs: Optional[str]
@@ -126,6 +130,7 @@ def probe(args: argparse.Namespace) -> Probe:
     num_errors = _read_int(dma_api / "num_errors") if present else None
     driver_filter = _read(dma_api / "driver_filter") if present else None
     bindings = _dwc2_bindings(args.sys_root)
+    boot_id = _read(BOOT_ID_PATH)
 
     if dma_debug != "y":
         state = "BLOCKED_CONFIG"
@@ -142,6 +147,7 @@ def probe(args: argparse.Namespace) -> Probe:
 
     return Probe(
         kernel=platform.release(),
+        boot_id=boot_id,
         config_path=str(config_path) if config_path else None,
         config_dma_api_debug=dma_debug,
         config_debug_fs=debug_fs,
@@ -161,6 +167,7 @@ def probe(args: argparse.Namespace) -> Probe:
 def print_probe(p: Probe) -> None:
     print(f"DMA_API_DEBUG_GATE: {p.state}")
     print(f"  kernel                 {p.kernel}")
+    print(f"  boot_id                {p.boot_id or 'UNAVAILABLE'}")
     print(f"  config_path            {p.config_path or 'NOT_FOUND'}")
     print(f"  CONFIG_DMA_API_DEBUG   {p.config_dma_api_debug or 'UNKNOWN'}")
     print(f"  CONFIG_DEBUG_FS        {p.config_debug_fs or 'UNKNOWN'}")
@@ -244,16 +251,55 @@ def arm(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_probe(path: Path, label: str) -> dict:
+    try:
+        value = json.loads((path / "probe.json").read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} probe.json unreadable: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} probe.json is not an object")
+    return value
+
+
+def _validate_identity_field(key: str, value: object) -> bool:
+    if key in {"kernel", "boot_id"}:
+        return isinstance(value, str) and bool(value.strip())
+    if key == "dwc2_bindings":
+        return isinstance(value, list) and all(isinstance(x, str) for x in value)
+    if key == "driver_filter":
+        return isinstance(value, str)
+    return False
+
+
 def compare(args: argparse.Namespace) -> int:
-    before = json.loads((args.before / "probe.json").read_text())
-    after = json.loads((args.after / "probe.json").read_text())
+    try:
+        before = _load_probe(args.before, "before")
+        after = _load_probe(args.after, "after")
+    except ValueError as exc:
+        print(f"DMA_API_DEBUG_COMPARE: REFUSED — {exc}")
+        return 2
+
     for name, obj in (("before", before), ("after", after)):
         if obj.get("state") != "READY":
             print(f"DMA_API_DEBUG_COMPARE: REFUSED — {name} snapshot state={obj.get('state')}")
             return 2
+
+    # A clean delta is admissible only inside one positively identified runtime
+    # window. Equality of the counter alone is not evidence of comparability.
+    for key in COMPARABILITY_KEYS:
+        if key not in before or key not in after:
+            print(f"DMA_API_DEBUG_COMPARE: REFUSED — {key} missing from snapshot identity")
+            return 2
+        if not _validate_identity_field(key, before[key]) or not _validate_identity_field(key, after[key]):
+            print(f"DMA_API_DEBUG_COMPARE: REFUSED — {key} unavailable or malformed")
+            return 2
+        if before[key] != after[key]:
+            print(f"DMA_API_DEBUG_COMPARE: REFUSED — {key} differs between snapshots")
+            return 2
+
     b = before.get("error_count")
     a = after.get("error_count")
-    if not isinstance(b, int) or not isinstance(a, int):
+    if not isinstance(b, int) or isinstance(b, bool) or not isinstance(a, int) or isinstance(a, bool):
         print("DMA_API_DEBUG_COMPARE: REFUSED — error_count unavailable")
         return 2
     delta = a - b
@@ -274,47 +320,89 @@ def compare(args: argparse.Namespace) -> int:
 
 def selftest(_: argparse.Namespace) -> int:
     checks = 0
-    with tempfile.TemporaryDirectory(prefix="dma-api-debug-selftest-") as td:
-        root = Path(td)
-        cfg = root / "config"
-        dbg = root / "debug" / "dma-api"
-        sys_root = root / "sys"
-        dbg.mkdir(parents=True)
-        (sys_root / "bus/platform/drivers/dwc2").mkdir(parents=True)
-        (sys_root / "bus/platform/drivers/dwc2/fe980000.usb").mkdir()
-        for name, value in {
-            "disabled": "N\n", "error_count": "0\n", "num_errors": "1\n",
-            "all_errors": "0\n", "driver_filter": "\n", "dump": "",
-            "min_free_entries": "10\n", "num_free_entries": "20\n", "nr_total_entries": "30\n",
-        }.items():
-            (dbg / name).write_text(value)
 
-        base = argparse.Namespace(config=cfg, debugfs=root / "debug", sys_root=sys_root)
+    def require(condition: bool, label: str) -> None:
+        nonlocal checks
+        if not condition:
+            raise RuntimeError(label)
+        checks += 1
 
-        cfg.write_text("# CONFIG_DMA_API_DEBUG is not set\nCONFIG_DEBUG_FS=y\n")
-        assert probe(base).state == "BLOCKED_CONFIG"; checks += 1
+    try:
+        with tempfile.TemporaryDirectory(prefix="dma-api-debug-selftest-") as td:
+            root = Path(td)
+            cfg = root / "config"
+            dbg = root / "debug" / "dma-api"
+            sys_root = root / "sys"
+            dbg.mkdir(parents=True)
+            (sys_root / "bus/platform/drivers/dwc2").mkdir(parents=True)
+            (sys_root / "bus/platform/drivers/dwc2/fe980000.usb").mkdir()
+            for name, value in {
+                "disabled": "N\n", "error_count": "0\n", "num_errors": "1\n",
+                "all_errors": "0\n", "driver_filter": "dwc2\n", "dump": "",
+                "min_free_entries": "10\n", "num_free_entries": "20\n", "nr_total_entries": "30\n",
+            }.items():
+                (dbg / name).write_text(value)
 
-        cfg.write_text("CONFIG_DMA_API_DEBUG=y\nCONFIG_DEBUG_FS=y\n")
-        assert probe(base).state == "READY"; checks += 1
-        assert probe(base).dwc2_bindings == ["platform:fe980000.usb"]; checks += 1
+            base = argparse.Namespace(config=cfg, debugfs=root / "debug", sys_root=sys_root)
 
-        (dbg / "disabled").write_text("Y\n")
-        assert probe(base).state == "BLOCKED_RUNTIME_DISABLED"; checks += 1
-        (dbg / "disabled").write_text("N\n")
+            cfg.write_text("# CONFIG_DMA_API_DEBUG is not set\nCONFIG_DEBUG_FS=y\n")
+            require(probe(base).state == "BLOCKED_CONFIG", "disabled-config negative control")
 
-        before = root / "before"; after = root / "after"
-        before.mkdir(); after.mkdir()
-        p0 = asdict(probe(base)); p0["error_count"] = 4
-        p1 = dict(p0); p1["error_count"] = 4
-        (before / "probe.json").write_text(json.dumps(p0))
-        (after / "probe.json").write_text(json.dumps(p1))
-        cargs = argparse.Namespace(before=before, after=after)
-        assert compare(cargs) == 0; checks += 1
-        p1["error_count"] = 5
-        (after / "probe.json").write_text(json.dumps(p1))
-        assert compare(cargs) == 10; checks += 1
+            cfg.write_text("CONFIG_DMA_API_DEBUG=y\nCONFIG_DEBUG_FS=y\n")
+            ready = probe(base)
+            require(ready.state == "READY", "ready positive control")
+            require(ready.dwc2_bindings == ["platform:fe980000.usb"], "binding capture")
+            require(isinstance(ready.boot_id, str) and bool(ready.boot_id), "boot_id capture")
 
-    print(f"DMA_API_DEBUG_SELFTEST: PASS {checks}/6")
+            (dbg / "disabled").write_text("Y\n")
+            require(probe(base).state == "BLOCKED_RUNTIME_DISABLED", "runtime-disabled negative control")
+            (dbg / "disabled").write_text("N\n")
+
+            before = root / "before"; after = root / "after"
+            before.mkdir(); after.mkdir()
+            p0 = asdict(probe(base)); p0["error_count"] = 4
+            p1 = dict(p0); p1["error_count"] = 4
+            (before / "probe.json").write_text(json.dumps(p0))
+            (after / "probe.json").write_text(json.dumps(p1))
+            cargs = argparse.Namespace(before=before, after=after)
+            require(compare(cargs) == 0, "equal-window clean positive control")
+
+            p1["error_count"] = 5
+            (after / "probe.json").write_text(json.dumps(p1))
+            require(compare(cargs) == 10, "error-delta positive control")
+
+            mismatches = {
+                "kernel": "different-kernel",
+                "dwc2_bindings": ["platform:different.usb"],
+                "driver_filter": "different-driver",
+                "boot_id": "00000000-0000-0000-0000-000000000000",
+            }
+            for key, other in mismatches.items():
+                bad = dict(p0)
+                bad[key] = other
+                bad["error_count"] = p0["error_count"]
+                (after / "probe.json").write_text(json.dumps(bad))
+                require(compare(cargs) == 2, f"{key} mismatch negative control")
+
+            missing_boot = dict(p0)
+            missing_boot.pop("boot_id", None)
+            (after / "probe.json").write_text(json.dumps(missing_boot))
+            require(compare(cargs) == 2, "missing boot_id negative control")
+
+            backwards = dict(p0)
+            backwards["error_count"] = 3
+            (after / "probe.json").write_text(json.dumps(backwards))
+            require(compare(cargs) == 2, "counter-backwards negative control")
+
+    except RuntimeError as exc:
+        print(f"DMA_API_DEBUG_SELFTEST: FAIL — {exc}")
+        return 1
+
+    expected = 13
+    if checks != expected:
+        print(f"DMA_API_DEBUG_SELFTEST: FAIL — internal count {checks}/{expected}")
+        return 1
+    print(f"DMA_API_DEBUG_SELFTEST: PASS {checks}/{expected}")
     return 0
 
 
@@ -352,7 +440,7 @@ def main() -> int:
     p = sub.add_parser("compare", help="compare before/after snapshots")
     p.add_argument("before", type=Path); p.add_argument("after", type=Path); p.set_defaults(func=compare)
 
-    p = sub.add_parser("selftest", help="run discriminating synthetic controls")
+    p = sub.add_parser("selftest", help="run discriminating positive and negative controls")
     p.set_defaults(func=selftest)
 
     args = ap.parse_args()

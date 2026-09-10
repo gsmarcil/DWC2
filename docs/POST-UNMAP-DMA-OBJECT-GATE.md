@@ -114,14 +114,48 @@ The exact gate build must carry debug/source mapping (`-g` or equivalent debug-i
 configuration) so the machine instructions can be tied to the `ep_dequeue` source
 condition rather than guessed from addresses.
 
+### Positive source-map predicate
+
+Source mapping is a load-bearing admission property, not a heuristic score. Symbol names
+and relocation names such as `dwc2_hsotg_ep_dequeue`, `dwc2_hsotg_ep_stop_xfr`, or
+`dwc2_hsotg_complete_request` are **not** source-map evidence: they can remain in a
+stripped/no-`-g` object.
+
+The capture tool must establish both independently:
+
+```text
+1. a real DWARF .debug_line (or legacy .zdebug_line) section exists in the exact artifact
+2. the selected-function disassembly contains an actual file:line marker recovered
+   from debug line information
+```
+
+When `--gadget-source` is supplied, the file component of that marker must resolve to
+`gadget.c`; an unrelated compilation unit's line table does not satisfy the gate.
+
+Canonical metadata:
+
+```text
+debug_line_section_present = true
+source_line_marker_present  = true
+source_interleave_present   = true   # conjunction of the two positive predicates
+```
+
+If either positive predicate is absent, capture must return `rc=2` and must not create
+the output artifact directory. Raising an indicator-count threshold is not an admissible
+repair because symbols are not independent evidence.
+
 Preferred inspection:
 
 ```bash
-objdump -dS --disassemble=dwc2_hsotg_ep_dequeue <artifact>
+objdump -dSl --disassemble=dwc2_hsotg_ep_dequeue <artifact>
 ```
 
-or an architecture-matched equivalent such as cross-`objdump`, `llvm-objdump -dS`,
-or `gdb disassemble /s`.
+or an architecture-matched equivalent such as cross-`objdump`, `llvm-objdump -dSl`,
+or `gdb disassemble /s` with equivalent file/line recovery.
+
+`file(1)` is descriptive only. If unavailable, the capture records
+`object_file_description = null` and continues; load-bearing object identity remains
+`object_sha256` plus `objdump -f` / exact build identity.
 
 ## Capture procedure
 
@@ -150,9 +184,10 @@ For a cross target, pass the matching disassembler explicitly, for example:
 ```
 
 The tool records object SHA256, config SHA256, compiler identity, objdump identity,
-board/epoch identity, LTO state from config, and source-interleaved disassembly.
-It refuses a pre-link `.o` when LTO is enabled and refuses closure capture when
-source context cannot be recovered.
+board/epoch identity, LTO state from config, section headers, positive source-line
+mapping evidence, and source-interleaved disassembly. It refuses a pre-link `.o` when
+LTO is enabled and refuses closure capture unless the positive source-map predicate is
+satisfied.
 
 The capture result remains:
 
@@ -161,6 +196,21 @@ CAPTURED_NOT_ADJUDICATED
 ```
 
 Capture success is not OBJECT_GATE success.
+
+## Selftest acceptance
+
+The selftest is load-bearing repository acceptance. It must include the same fixture
+compiled once with `-g` and once without `-g`:
+
+```text
+with -g     -> capture succeeds and records positive DWARF + file:line evidence
+without -g  -> rc=2 and no output directory is produced
+```
+
+The no-`-g` object may retain function/relocation symbols; that is intentional. The
+negative control proves those weak indicators cannot satisfy `--require-source-map`.
+The selftest also verifies that absence of optional `file(1)` metadata does not block
+capture.
 
 ## Pre-registered falsifier
 

@@ -8,8 +8,9 @@ for a later fail-closed control-flow adjudication.
 Important closure rules:
 - With LTO enabled, a pre-link .o is not an admissible closure artifact; use the
   final linked image (vmlinux or the final module containing DWC2).
-- Exact closure requires debug/source mapping. The capture uses objdump -S and
-  refuses when it cannot recover source context for dwc2_hsotg_ep_dequeue().
+- Exact closure requires positive debug/source mapping: a real DWARF line-table
+  section plus at least one file:line marker in the selected function disassembly.
+  Symbol names or relocation names never count as source mapping.
 - Do not look only for a call to dwc2_hsotg_ep_stop_xfr(): that static helper may
   be inlined. Adjudication must recognize either a retained call or the inlined
   SNAK/SGOUTNAK -> EPDIS -> wait sequence.
@@ -31,7 +32,10 @@ from datetime import datetime, timezone
 EXPECTED_GADGET_SHA256 = "baf17cb89e78c8a63f0a9688af7697875018f162923118f72f1092df703f6d8d"
 DEFAULT_FUNCTION = "dwc2_hsotg_ep_dequeue"
 
-LTO_Y_RE = re.compile(r"^CONFIG_(?:LTO(?:_[A-Z0-9_]+)?|ARCH_SUPPORTS_LTO_CLANG_THIN)=y$", re.M)
+DEBUG_LINE_SECTION_RE = re.compile(r"(?m)^\s*\d+\s+\.(?:z)?debug_line(?:\s|$)")
+SOURCE_LINE_MARKER_RE = re.compile(
+    r"(?m)^(?P<path>.+\.(?:c|h)):(?P<line>[1-9][0-9]*)(?:\s*(?:\([^\n]*\))?\s*)$"
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -60,10 +64,18 @@ def pick_tool(explicit: str | None, candidates: tuple[str, ...]) -> str:
     raise SystemExit(f"REFUSED: none of these tools are available: {', '.join(candidates)}")
 
 
+def pick_optional_tool(explicit: str | None, candidates: tuple[str, ...]) -> str | None:
+    if explicit:
+        path = shutil.which(explicit) if os.sep not in explicit else explicit
+        return str(path) if path and Path(path).exists() else None
+    for name in candidates:
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
 def config_lto_enabled(text: str) -> bool:
-    # CONFIG_LTO=y, CONFIG_LTO_CLANG=y, CONFIG_LTO_CLANG_THIN=y,
-    # CONFIG_LTO_GCC=y, etc. The ARCH_SUPPORTS_* capability alone must not make
-    # LTO "enabled", so filter it back out after the broad regex.
     for line in text.splitlines():
         if not line.endswith("=y"):
             continue
@@ -79,20 +91,21 @@ def likely_prelink_object(path: Path) -> bool:
     return path.suffix == ".o" and not path.name.endswith(".ko.o")
 
 
-def source_context_present(disassembly: str, gadget_source: Path | None) -> bool:
-    # objdump -S may emit either the source filename/line markers or the exact
-    # source text. Accept either, but do not infer line identity from addresses.
-    needles = [
-        "dwc2_hsotg_ep_dequeue",
-        "if (req == &hs_ep->req->req)",
-        "dwc2_hsotg_ep_stop_xfr",
-        "dwc2_hsotg_complete_request",
-    ]
+def source_mapping_evidence(section_headers: str, disassembly: str,
+                            gadget_source: Path | None) -> tuple[bool, bool, bool, list[str]]:
+    """Return positive source-map evidence independent from symbols/relocations."""
+    has_debug_line = DEBUG_LINE_SECTION_RE.search(section_headers) is not None
+    markers = [m.group(0).strip() for m in SOURCE_LINE_MARKER_RE.finditer(disassembly)]
     if gadget_source is not None:
-        needles.extend([gadget_source.name, str(gadget_source)])
-    # Function name alone is not enough; require a second source-oriented anchor.
-    hits = sum(1 for n in needles if n in disassembly)
-    return hits >= 2
+        expected_name = gadget_source.name
+        relevant = []
+        for marker in markers:
+            source_path = marker.rsplit(":", 1)[0]
+            if Path(source_path).name == expected_name:
+                relevant.append(marker)
+        markers = relevant
+    has_source_line = bool(markers)
+    return has_debug_line and has_source_line, has_debug_line, has_source_line, markers
 
 
 def capture(args: argparse.Namespace) -> int:
@@ -107,8 +120,12 @@ def capture(args: argparse.Namespace) -> int:
         return 2
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    objdump = pick_tool(args.objdump, ("objdump", "llvm-objdump"))
-    file_tool = pick_tool(args.file_tool, ("file",))
+    try:
+        objdump = pick_tool(args.objdump, ("objdump", "llvm-objdump"))
+    except SystemExit as exc:
+        print(f"OBJECT_GATE_CAPTURE: {exc}", file=sys.stderr)
+        return 2
+    file_tool = pick_optional_tool(args.file_tool, ("file",))
 
     source_sha = None
     src: Path | None = None
@@ -126,7 +143,6 @@ def capture(args: argparse.Namespace) -> int:
             return 2
 
     cfg = args.config.resolve() if args.config else None
-    cfg_text = None
     lto_enabled = None
     if cfg:
         if not cfg.is_file():
@@ -141,16 +157,17 @@ def capture(args: argparse.Namespace) -> int:
 
     try:
         objdump_version = run([objdump, "--version"]).stdout.splitlines()[0]
-        file_desc = run([file_tool, "-L", str(obj)]).stdout.strip()
         obj_header = run([objdump, "-f", str(obj)]).stdout
+        section_headers = run([objdump, "-h", str(obj)]).stdout
+        file_desc = run([file_tool, "-L", str(obj)]).stdout.strip() if file_tool else None
         if "llvm-objdump" in Path(objdump).name:
-            dis_argv = [objdump, "-drS", "--no-show-raw-insn",
+            dis_argv = [objdump, "-drSl", "--no-show-raw-insn",
                         f"--disassemble-symbols={args.function}", str(obj)]
         else:
-            dis_argv = [objdump, "-drwCS", "--no-show-raw-insn",
+            dis_argv = [objdump, "-drwCSl", "--no-show-raw-insn",
                         f"--disassemble={args.function}", str(obj)]
         dis = run(dis_argv, check=False)
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.CalledProcessError, IndexError) as exc:
         print(f"OBJECT_GATE_CAPTURE: REFUSED — tool execution failed: {exc}", file=sys.stderr)
         return 2
 
@@ -165,16 +182,20 @@ def capture(args: argparse.Namespace) -> int:
         print("  if LTO changed symbolization, capture the exact linked call site and adjudicate manually", file=sys.stderr)
         return 2
 
-    source_mapped = source_context_present(dis.stdout, src)
+    source_mapped, has_debug_line, has_source_line, source_line_markers = source_mapping_evidence(
+        section_headers, dis.stdout, src
+    )
     if args.require_source_map and not source_mapped:
-        print("OBJECT_GATE_CAPTURE: REFUSED — source/line context not recovered by objdump -S", file=sys.stderr)
-        print("  rebuild the target with -g (or equivalent debug info) and recapture", file=sys.stderr)
+        print("OBJECT_GATE_CAPTURE: REFUSED — positive DWARF source/line mapping not recovered", file=sys.stderr)
+        print(f"  debug_line_section={has_debug_line} source_line_marker={has_source_line}", file=sys.stderr)
+        print("  rebuild the exact target with -g (or equivalent line-table debug info) and recapture", file=sys.stderr)
         return 2
 
     stage = Path(tempfile.mkdtemp(prefix=".object-gate-stage-", dir=out.parent))
     try:
         (stage / "disassembly-source.txt").write_text(dis.stdout)
         (stage / "object-header.txt").write_text(obj_header)
+        (stage / "section-headers.txt").write_text(section_headers)
         if cfg:
             shutil.copyfile(cfg, stage / "kernel-config.txt")
 
@@ -191,8 +212,12 @@ def capture(args: argparse.Namespace) -> int:
             "object_path": str(obj),
             "object_sha256": sha256_file(obj),
             "object_file_description": file_desc,
+            "file_tool": file_tool,
             "object_is_prelink_o": likely_prelink_object(obj),
             "lto_enabled_from_config": lto_enabled,
+            "debug_line_section_present": has_debug_line,
+            "source_line_marker_present": has_source_line,
+            "source_line_markers": source_line_markers,
             "source_interleave_present": source_mapped,
             "objdump": objdump,
             "objdump_version": objdump_version,
@@ -236,6 +261,8 @@ def capture(args: argparse.Namespace) -> int:
     print(f"  board_id        {meta['board_id']}")
     print(f"  object_sha256   {meta['object_sha256']}")
     print(f"  lto_enabled     {meta['lto_enabled_from_config']}")
+    print(f"  debug_line      {meta['debug_line_section_present']}")
+    print(f"  source_line     {meta['source_line_marker_present']}")
     print(f"  source_mapped   {meta['source_interleave_present']}")
     print(f"  function        {args.function}")
     print(f"  output          {out}")
@@ -243,6 +270,7 @@ def capture(args: argparse.Namespace) -> int:
 
 
 def selftest(_: argparse.Namespace) -> int:
+    passed = 0
     cc = shutil.which("cc")
     if not cc:
         print("OBJECT_GATE_CAPTURE_SELFTEST: SKIP — cc unavailable")
@@ -251,26 +279,31 @@ def selftest(_: argparse.Namespace) -> int:
         root = Path(td)
         src = root / "t.c"
         obj = root / "t.o"
+        obj_nog = root / "t-nog.o"
         out = root / "artifact"
         cfg = root / ".config"
         src.write_text(r'''struct usb_request { void *p; };
 struct wrap { struct usb_request req; long x; };
 struct ep { struct wrap *req; };
-extern void stop(struct ep *);
-extern void complete(struct ep *, struct wrap *);
+extern void dwc2_hsotg_ep_stop_xfr(struct ep *);
+extern void dwc2_hsotg_complete_request(struct ep *, struct wrap *);
 __attribute__((noinline)) int dwc2_hsotg_ep_dequeue(struct ep *ep, struct usb_request *req, struct wrap *w) {
-    if (req == &ep->req->req) stop(ep);
-    complete(ep, w);
+    if (req == &ep->req->req) dwc2_hsotg_ep_stop_xfr(ep);
+    dwc2_hsotg_complete_request(ep, w);
     return 0;
 }
 ''')
         cfg.write_text("# CONFIG_LTO is not set\n")
-        cp = subprocess.run([cc, "-O2", "-g", "-c", str(src), "-o", str(obj)],
-                            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if cp.returncode:
-            print("OBJECT_GATE_CAPTURE_SELFTEST: FAIL — compile")
-            print(cp.stdout)
-            return 1
+        for argv, label in (
+            ([cc, "-O2", "-g", "-c", str(src), "-o", str(obj)], "debug compile"),
+            ([cc, "-O2", "-c", str(src), "-o", str(obj_nog)], "no-debug compile"),
+        ):
+            cp = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if cp.returncode:
+                print(f"OBJECT_GATE_CAPTURE_SELFTEST: FAIL — {label}")
+                print(cp.stdout)
+                return 1
+
         ns = argparse.Namespace(
             object=obj, out=out, objdump=None, file_tool=None,
             gadget_source=None, expected_gadget_sha256=EXPECTED_GADGET_SHA256,
@@ -281,24 +314,60 @@ __attribute__((noinline)) int dwc2_hsotg_ep_dequeue(struct ep *ep, struct usb_re
         )
         rc = capture(ns)
         if rc != 0:
-            print("OBJECT_GATE_CAPTURE_SELFTEST: FAIL — capture")
+            print("OBJECT_GATE_CAPTURE_SELFTEST: FAIL — positive source-mapped capture")
             return 1
+        passed += 1
         meta = json.loads((out / "meta.json").read_text())
         dis = (out / "disassembly-source.txt").read_text()
-        checks = [
+        positive_checks = [
             meta["status"] == "CAPTURED_NOT_ADJUDICATED",
             meta["function"] == DEFAULT_FUNCTION,
             len(meta["object_sha256"]) == 64,
             DEFAULT_FUNCTION in dis,
+            meta["debug_line_section_present"] is True,
+            meta["source_line_marker_present"] is True,
             meta["source_interleave_present"] is True,
             meta["lto_enabled_from_config"] is False,
             (out / "object-header.txt").is_file(),
+            (out / "section-headers.txt").is_file(),
         ]
-        if not all(checks):
-            print("OBJECT_GATE_CAPTURE_SELFTEST: FAIL — invariant")
+        if not all(positive_checks):
+            print("OBJECT_GATE_CAPTURE_SELFTEST: FAIL — positive invariant")
             return 1
+        passed += 1
 
-        # Fail closed when LTO is enabled but only a pre-link .o is supplied.
+        # Negative control: same fixture without -g retains the exact weak symbol/
+        # relocation look-alikes that defeated the old hits>=2 heuristic, yet must
+        # still be refused and leave no artifact.
+        objdump = pick_tool(None, ("objdump", "llvm-objdump"))
+        weak = run([objdump, "-dr", str(obj_nog)]).stdout
+        weak_needles = (DEFAULT_FUNCTION, "dwc2_hsotg_ep_stop_xfr", "dwc2_hsotg_complete_request")
+        if not all(n in weak for n in weak_needles):
+            print("OBJECT_GATE_CAPTURE_SELFTEST: FAIL — no-debug fixture lost weak symbol look-alikes")
+            return 1
+        passed += 1
+        no_debug = argparse.Namespace(**vars(ns))
+        no_debug.object = obj_nog
+        no_debug.out = root / "no-debug-artifact"
+        if capture(no_debug) != 2 or no_debug.out.exists():
+            print("OBJECT_GATE_CAPTURE_SELFTEST: FAIL — no-debug source-map negative control")
+            return 1
+        passed += 1
+
+        # Auxiliary `file(1)` is descriptive only and must not gate admissible capture.
+        no_file = argparse.Namespace(**vars(ns))
+        no_file.out = root / "no-file-artifact"
+        no_file.file_tool = "definitely-missing-file-tool"
+        if capture(no_file) != 0:
+            print("OBJECT_GATE_CAPTURE_SELFTEST: FAIL — optional file tool")
+            return 1
+        passed += 1
+        no_file_meta = json.loads((no_file.out / "meta.json").read_text())
+        if no_file_meta["object_file_description"] is not None or no_file_meta["file_tool"] is not None:
+            print("OBJECT_GATE_CAPTURE_SELFTEST: FAIL — optional file metadata invariant")
+            return 1
+        passed += 1
+
         lto_cfg = root / "lto.config"
         lto_cfg.write_text("CONFIG_LTO=y\nCONFIG_LTO_CLANG=y\n")
         bad_lto = argparse.Namespace(**vars(ns))
@@ -307,15 +376,20 @@ __attribute__((noinline)) int dwc2_hsotg_ep_dequeue(struct ep *ep, struct usb_re
         if capture(bad_lto) != 2 or bad_lto.out.exists():
             print("OBJECT_GATE_CAPTURE_SELFTEST: FAIL — LTO pre-link negative control")
             return 1
+        passed += 1
 
-        bad_out = root / "bad-artifact"
         bad = argparse.Namespace(**vars(ns))
-        bad.out = bad_out
+        bad.out = root / "bad-artifact"
         bad.function = "definitely_missing_symbol"
-        if capture(bad) != 2 or bad_out.exists():
+        if capture(bad) != 2 or bad.out.exists():
             print("OBJECT_GATE_CAPTURE_SELFTEST: FAIL — missing-symbol negative control")
             return 1
-    print("OBJECT_GATE_CAPTURE_SELFTEST: PASS 8/8")
+        passed += 1
+    expected = 8
+    if passed != expected:
+        print(f"OBJECT_GATE_CAPTURE_SELFTEST: FAIL — internal count {passed}/{expected}")
+        return 1
+    print(f"OBJECT_GATE_CAPTURE_SELFTEST: PASS {passed}/{expected}")
     return 0
 
 
@@ -328,7 +402,7 @@ def main() -> int:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--function", default=DEFAULT_FUNCTION)
     p.add_argument("--objdump")
-    p.add_argument("--file-tool")
+    p.add_argument("--file-tool", help="optional descriptive file(1)-compatible tool")
     p.add_argument("--gadget-source", type=Path)
     p.add_argument("--expected-gadget-sha256", default=EXPECTED_GADGET_SHA256)
     p.add_argument("--config", type=Path, required=True)

@@ -29,6 +29,14 @@ Negative evidence is much stricter:
 - absence is configuration scoped;
 - no negative result is carried across an epoch change.
 
+### Positive-predicate rule for executable gates
+
+An executable gate may return acceptance only from a **positive predicate** that directly establishes the property the gate claims to require. A count of weak indicators, symbol-name coincidence, metadata resemblance, or equality of an unbound scalar is not a substitute for the required evidence.
+
+Every executable gate that can emit PASS/clean closure must carry at least one discriminating **negative control** in its selftest. The negative control must remove or alter the required evidence while keeping weaker look-alikes available, and the gate must fail closed. A selftest that exercises only the happy path is not an acceptance test.
+
+Repository acceptance must execute those negative controls, not merely check that the selftest code exists.
+
 ## Identity before causality
 
 Temporal adjacency is insufficient for R2. The chain must close identity across request, mapping, retired IOVA range and post-unmap device access, with no ambiguous remap in the attribution window.

@@ -151,8 +151,9 @@ from pathlib import Path
 requirements = {
     'docs/POST-UNMAP-DMA-L2.md': ['K_sw_ATTEMPTED', 'K_hw', 'PRIMARY-A', 'PRIMARY-B'],
     'docs/POST-UNMAP-DMA-G2.5.md': ['TARGET_BUILD_ID', 'PRIMARY-A', 'PRIMARY-B'],
-    'docs/POST-UNMAP-DMA-OBJECT-GATE.md': ['PENDING_OBJECT_GATE', 'OBJECT-PROVEN', 'KILLED'],
-    'docs/POST-UNMAP-DMA-G0.md': ['DMA_API_DEBUG', 'tools/dma_api_debug_gate.py'],
+    'docs/POST-UNMAP-DMA-OBJECT-GATE.md': ['PENDING_OBJECT_GATE', 'OBJECT-PROVEN', 'KILLED', '.debug_line', 'file:line'],
+    'docs/POST-UNMAP-DMA-G0.md': ['DMA_API_DEBUG', 'tools/dma_api_debug_gate.py', 'boot_id', 'dwc2_bindings', 'driver_filter'],
+    'docs/METHODOLOGY.md': ['positive predicate', 'negative control'],
 }
 for path, tokens in requirements.items():
     text = Path(path).read_text()
@@ -195,7 +196,26 @@ else
     printf '%-34s %s\n' branch_and_source_policy FAIL >&2
 fi
 
-# 5. Holder producer contract and discriminating controls.
+# 5. Source-foundation executable gates must prove their discriminating controls.
+# Merely shipping a selftest function is insufficient: repository acceptance runs it.
+for spec in \
+    'object_gate_selftest:tools/capture_ep_dequeue_object_gate.py' \
+    'dma_api_debug_selftest:tools/dma_api_debug_gate.py'
+do
+    label=${spec%%:*}
+    script=${spec#*:}
+    ctl_tmp=${TMPDIR:-/tmp}/dwc2-$label.$$
+    if [ -f "$script" ] && python3 "$script" selftest >"$ctl_tmp" 2>&1; then
+        pass "$label"
+    else
+        failmsg "$label"
+        [ -s "$ctl_tmp" ] && sed 's/^/  /' "$ctl_tmp" >&2
+        foundation_fail=1
+    fi
+    rm -f "$ctl_tmp"
+done
+
+# 6. Holder producer contract and discriminating controls.
 holder_tmp=${TMPDIR:-/tmp}/dwc2-holder-contract.$$
 if python3 verify_holder_contract.py >"$holder_tmp" 2>&1; then
     pass holder_producer_contract
