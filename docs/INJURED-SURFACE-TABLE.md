@@ -203,10 +203,39 @@ that. The strongest defensible report reading is therefore:
 > part of a lock-flow/sparse fix, leaving USB-reset endpoint disable after
 > disconnect-time request retirement and DMA unmap.
 
+That historical statement establishes **software ordering only**. It does not,
+by itself, establish that the ordering is unsafe: a controller-level reset
+contract could still independently quiesce all pending DMA before software
+reaches retirement. That is exactly the unresolved `K_hw` question. Until an
+applicable databook matched to `{GSNPSID, GHWCFG1..4}` or the frozen runtime
+controls resolve it, the combined state is:
+
+```text
+software ordering:  SOURCE-PROVEN
+K_hw:               UNDETERMINED
+security consequence: NOT PROVEN
+```
+
+If the matched hardware contract guarantees reset-time DMA quiescence, the
+reset branch is dead despite the software ordering. If it says explicit
+software quiescence is required, or runtime evidence establishes surviving
+post-reset progress under the frozen controls, the historical ordering becomes
+load-bearing evidence for the defect rather than merely provenance.
+
 Any future fix proposal must account for the lock architecture introduced by
 `4fe4f9fe`; simply proposing to restore the old `dwc2_hsotg_disconnect() ->
 ep_disable()` implementation would ignore the regression that commit was
 written to fix.
+
+A **candidate remediation direction, not a patch**, is therefore to preserve
+the current lock architecture and reorder reset retirement instead: use the
+existing reset-side endpoint-disable/quiescence step in
+`dwc2_hsotg_core_init_disconnected(..., true)` as the predecessor of request
+retirement, so `kill_all_requests()` / DMA unmap occur only after quiescence is
+established. This direction must still be checked against EP0 handling,
+callbacks, state transitions, and failure semantics before it can become a
+patch proposal; it is recorded only so the eventual fix is framed as an
+ordering repair rather than a rollback of `4fe4f9fe`.
 
 The durable version statement is commit-first, release-second:
 
