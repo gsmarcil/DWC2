@@ -28,6 +28,30 @@ printf '%s\n' "$OUT"
   printf 'arch: '; uname -m
 } | tee "$OUT/platform.txt"
 
+if [ -r /proc/sys/kernel/random/boot_id ]; then
+  cat /proc/sys/kernel/random/boot_id | tee "$OUT/boot_id.txt"
+else
+  printf 'BOOT_ID_NOT_CAPTURED\n' | tee "$OUT/boot_id.status"
+fi
+
+# TARGET_BUILD_ID requires a DT identity on DT platforms. Prefer the exact live FDT
+# blob; if unavailable, freeze the live DTS as an explicit fallback fingerprint.
+if [ -r /sys/firmware/fdt ]; then
+  sudo sha256sum /sys/firmware/fdt | tee "$OUT/dtb_hash.txt"
+  printf 'dtb_hash_source=/sys/firmware/fdt\n' | tee "$OUT/dtb_hash_source.txt"
+elif command -v dtc >/dev/null 2>&1; then
+  sudo dtc -I fs -O dts /sys/firmware/devicetree/base \
+    >"$OUT/live-boot.dts" 2>"$OUT/live-boot-dtc.err" || true
+  if [ -s "$OUT/live-boot.dts" ]; then
+    sha256sum "$OUT/live-boot.dts" | tee "$OUT/dtb_hash.txt"
+    printf 'dtb_hash_source=live-boot.dts-fallback\n' | tee "$OUT/dtb_hash_source.txt"
+  else
+    printf 'DTB_HASH_NOT_CAPTURED\n' | tee "$OUT/dtb_hash.status"
+  fi
+else
+  printf 'DTB_HASH_NOT_CAPTURED\n' | tee "$OUT/dtb_hash.status"
+fi
+
 if [ -r /proc/config.gz ]; then
   zcat /proc/config.gz >"$OUT/kernel.config"
 elif [ -r "/boot/config-$(uname -r)" ]; then
@@ -44,15 +68,32 @@ if [ -f "$OUT/kernel.config" ]; then
 fi
 ```
 
-This step is evidence only. Do not infer ARM32/LPAE from the board model; record the kernel that actually booted.
+This step is evidence only. Do not infer ARM32/LPAE from the board model; record the kernel that actually booted. `boot_id.txt` and the DT fingerprint bind later snapshots to this exact boot/configuration epoch.
 
 ## 2. PI-FB1 + PI-FB2 — first-boot zero-cost capture
 
-Mount debugfs if available, then collect UDC state and the DWC2 hardware/parameter view.
+Capture module/UDC state **before** attempting to load anything. `modprobe dwc2` is allowed only after that baseline is preserved, so a previously unloaded driver cannot be mistaken for the original boot state.
 
 ```sh
-sudo mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null || true
+{
+  echo '=== lsmod before modprobe ==='
+  lsmod 2>&1 | grep -E '(^|[[:space:]])dwc2([[:space:]]|$)' || true
+  echo
+  echo '=== /sys/class/udc before modprobe ==='
+  ls -la /sys/class/udc 2>&1 || true
+} | tee "$OUT/dwc2-module-udc-before.txt"
+
 sudo modprobe dwc2 2>"$OUT/modprobe-dwc2.err" || true
+
+{
+  echo '=== lsmod after modprobe ==='
+  lsmod 2>&1 | grep -E '(^|[[:space:]])dwc2([[:space:]]|$)' || true
+  echo
+  echo '=== /sys/class/udc after modprobe ==='
+  ls -la /sys/class/udc 2>&1 || true
+} | tee "$OUT/dwc2-module-udc-after.txt"
+
+sudo mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null || true
 
 {
   echo '=== /sys/class/udc ==='
@@ -107,14 +148,46 @@ if [ -n "$DWC2_DIR" ]; then
     printf 'CONTROLLER_SIGNATURE_COMPLETE\n' | tee "$OUT/pi-controller-signature.status"
   fi
 
-  GHWCFG4_HEX="$(grep -i 'GHWCFG4' "$OUT/dwc2-regdump.txt" 2>/dev/null \
-      | grep -o '0x[0-9A-Fa-f]\+' | tail -n1 || true)"
+  # The driver's effective g_dma_desc is the load-bearing runtime value.
+  # GHWCFG4.DESC_DMA is corroboration only; a parse failure must never become 0.
+  G_DMA_DESC="$(sed -nE \
+      's/^[[:space:]]*g_dma_desc[[:space:]]*[:=]?[[:space:]]*([01])([[:space:]].*)?$/\1/p' \
+      "$OUT/dwc2-params.txt" 2>/dev/null | tail -n1 || true)"
+  case "$G_DMA_DESC" in
+    0|1) printf 'G_DMA_DESC_EFFECTIVE=%s\n' "$G_DMA_DESC" | tee "$OUT/pi-fb2-g-dma-desc.txt" ;;
+    *)   printf 'G_DMA_DESC_EFFECTIVE_NOT_CAPTURED\n' | tee "$OUT/pi-fb2-g-dma-desc.txt"; G_DMA_DESC="" ;;
+  esac
+
+  GHWCFG4_RAW="$(grep -i 'GHWCFG4' "$OUT/dwc2-regdump.txt" 2>/dev/null | tail -n1 || true)"
+  printf 'GHWCFG4_RAW=%s\n' "$GHWCFG4_RAW" | tee "$OUT/pi-fb2-ghwcfg4.txt"
+  GHWCFG4_HEX="$(printf '%s\n' "$GHWCFG4_RAW" | awk '{print $NF}' | tr -d ',;()' || true)"
+  case "$GHWCFG4_HEX" in
+    0x*|0X*) ;;
+    '') printf 'GHWCFG4_NOT_CAPTURED\n' | tee -a "$OUT/pi-fb2-ghwcfg4.txt" ;;
+    *)  printf 'GHWCFG4_UNPARSEABLE=%s\n' "$GHWCFG4_HEX" | tee -a "$OUT/pi-fb2-ghwcfg4.txt"; GHWCFG4_HEX="" ;;
+  esac
+
+  GHWCFG4_DESC_DMA=""
   if [ -n "$GHWCFG4_HEX" ]; then
-    printf 'GHWCFG4=%s\n' "$GHWCFG4_HEX" | tee "$OUT/pi-fb2-ghwcfg4.txt"
-    printf 'GHWCFG4_DESC_DMA=%d\n' "$(( (GHWCFG4_HEX >> 30) & 1 ))" \
-      | tee -a "$OUT/pi-fb2-ghwcfg4.txt"
+    GHWCFG4_DESC_DMA="$(( (GHWCFG4_HEX >> 30) & 1 ))"
+    printf 'GHWCFG4=%s\n' "$GHWCFG4_HEX" | tee -a "$OUT/pi-fb2-ghwcfg4.txt"
+    printf 'GHWCFG4_DESC_DMA=%s\n' "$GHWCFG4_DESC_DMA" | tee -a "$OUT/pi-fb2-ghwcfg4.txt"
+  fi
+
+  if [ -n "$G_DMA_DESC" ] && [ -n "$GHWCFG4_DESC_DMA" ]; then
+    if [ "$G_DMA_DESC" = "$GHWCFG4_DESC_DMA" ]; then
+      printf 'PI_FB2_DESC_DMA_STATUS=CONSISTENT_EFFECTIVE_%s\n' "$G_DMA_DESC" \
+        | tee "$OUT/pi-fb2-desc-dma-status.txt"
+    else
+      printf 'PI_FB2_DESC_DMA_STATUS=AMBIGUOUS_REGISTER_DRIVER_MISMATCH effective=%s register=%s\n' \
+        "$G_DMA_DESC" "$GHWCFG4_DESC_DMA" | tee "$OUT/pi-fb2-desc-dma-status.txt"
+    fi
+  elif [ -n "$G_DMA_DESC" ]; then
+    printf 'PI_FB2_DESC_DMA_STATUS=EFFECTIVE_%s_REGISTER_UNCONFIRMED\n' "$G_DMA_DESC" \
+      | tee "$OUT/pi-fb2-desc-dma-status.txt"
   else
-    printf 'GHWCFG4_NOT_CAPTURED\n' | tee "$OUT/pi-fb2-ghwcfg4.txt"
+    printf 'PI_FB2_DESC_DMA_STATUS=EFFECTIVE_NOT_CAPTURED\n' \
+      | tee "$OUT/pi-fb2-desc-dma-status.txt"
   fi
 else
   printf 'DWC2_DEBUGFS_NOT_FOUND\n' | tee "$OUT/dwc2-debugfs-dir.txt"
@@ -129,11 +202,14 @@ PI-FB1:
   no usable UDC                           -> Pi runtime branch blocked for this configuration
 
 PI-FB2:
-  GHWCFG4.DESC_DMA = 0                   -> PRIMARY-B_ON_PI killed only
-  GHWCFG4.DESC_DMA = 1 + g_dma_desc=1    -> PRIMARY-B capability survives on Pi
+  g_dma_desc=0 + no register/driver mismatch -> PRIMARY-B_ON_PI killed for this epoch
+  g_dma_desc=1 + no register/driver mismatch -> PRIMARY-B capability survives on Pi
+  GHWCFG4 missing/unparseable                 -> do not manufacture DESC_DMA=0; register corroboration is unavailable
+  GHWCFG4.DESC_DMA != g_dma_desc              -> AMBIGUOUS; recapture/diagnose before any PRIMARY-B verdict
+  g_dma_desc not captured                     -> no PRIMARY-B capability verdict
 ```
 
-`GHWCFG4.DESC_DMA` is bit 30. Keep the raw register dump as the primary artifact, not only the decoded value. For reset/databook work, the load-bearing controller match key is the same-epoch raw tuple `{GSNPSID, GHWCFG1, GHWCFG2, GHWCFG3, GHWCFG4}`; `GSNPSID` alone is never sufficient.
+`g_dma_desc` from the driver's active parameter view is the load-bearing runtime value. `GHWCFG4.DESC_DMA` (bit 30) is an independent hardware corroboration; a mismatch is fail-closed `AMBIGUOUS`. Keep the raw register dump as the primary register artifact, not only the decoded bit. For reset/databook work, the load-bearing controller match key is the same-epoch raw tuple `{GSNPSID, GHWCFG1, GHWCFG2, GHWCFG3, GHWCFG4}`; `GSNPSID` alone is never sufficient.
 
 ## 3. Role/overlay diagnosis only if PI-FB1 is blocked
 
@@ -167,7 +243,7 @@ printf '\n# DWC2 campaign epoch\ndtoverlay=dwc2,dr_mode=peripheral\n' | sudo tee
 sudo reboot
 ```
 
-After reboot, start a NEW `$OUT` directory and repeat sections 1-2. Never merge pre-overlay and post-overlay evidence into one epoch.
+After reboot, start a NEW `$OUT` directory and repeat sections 1-2. Section 1 must produce a new `boot_id.txt` and `dtb_hash.txt` (or an explicit `DTB_HASH_NOT_CAPTURED` failure) for the post-overlay epoch. Never merge pre-overlay and post-overlay evidence into one epoch, and never reuse the pre-overlay `dtb_hash` in the new `TARGET_BUILD_ID`.
 
 ## 4. PI-G25 — topology preflight available without a custom observer
 
@@ -214,7 +290,7 @@ The exact helper/API used for `translated_dma_phys` and SWIOTLB membership is se
 
 Do not start an evidence-bearing R1A batch until the repository's campaign readiness gate is green and the exact executing observer/harness epoch is frozen. Then follow `docs/RUNTIME-RUNBOOK.md` rather than improvising commands here.
 
-Quick repository-side precondition check on the development host:
+Repository-side precondition check:
 
 ```sh
 cd /path/to/DWC2
@@ -222,6 +298,38 @@ cd /path/to/DWC2
 ```
 
 A nonzero exit remains fail-closed. It is not permission to run a negative R1A campaign with incomplete witnesses.
+
+The green repository gate does **not** by itself bind the running Pi kernel to the source tree that produced it. On the machine that actually builds the evidence-bearing kernel, before the build, freeze the exact source state:
+
+```sh
+cd /path/to/linux
+BUILD_TREE_PROOF="kernel-build-tree.txt"
+{
+  printf 'build_host='; hostname
+  printf 'kernel_source_head='; git rev-parse HEAD
+  echo 'kernel_source_status_begin'
+  git status --porcelain=v1
+  echo 'kernel_source_status_end'
+} | tee "$BUILD_TREE_PROOF"
+
+if [ -n "$(git status --porcelain=v1)" ]; then
+  printf 'KERNEL_BUILD_TREE_DIRTY — REFUSED\n' | tee -a "$BUILD_TREE_PROOF"
+  exit 2
+fi
+printf 'KERNEL_BUILD_TREE_CLEAN\n' | tee -a "$BUILD_TREE_PROOF"
+```
+
+If the kernel is cross-built elsewhere, copy that exact `kernel-build-tree.txt` into the Pi `$OUT` unchanged before the campaign. If it is built on the Pi, copy it directly into `$OUT`. The evidence epoch is incomplete if the running kernel cannot be bound to a clean build-tree HEAD plus the already-frozen config/DT identity.
+
+Before `CAMPAIGN-LIVE`, both reset controls are mandatory and must satisfy their validity predicates from `RUNTIME-RUNBOOK.md`:
+
+```text
+CTRL-IDLE       valid first
+CTRL-COMPLETED  valid second
+CAMPAIGN-LIVE   only after both controls are valid
+```
+
+A failed/invalid control stops the campaign; it is never counted as a clean control.
 
 ## 6. PI-G6
 
