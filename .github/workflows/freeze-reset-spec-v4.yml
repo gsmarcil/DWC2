@@ -1,0 +1,45 @@
+name: Freeze reset evidence specification v4
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-spec:
+    if: github.event.head_commit.message != 'docs: freeze reset evidence controls and controller signature'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply exact specification transforms
+        run: python3 .github/scripts/freeze_reset_spec_v4.py
+
+      - name: Fail-closed semantic checks
+        run: |
+          set -euxo pipefail
+          git diff --check
+          grep -q 'CTRL-IDLE / idle-reset' docs/EVIDENCE-LADDER.md
+          grep -q 'CTRL-COMPLETED / completed-then-reset' docs/EVIDENCE-LADDER.md
+          grep -q 'CAMPAIGN-LIVE / live-then-reset' docs/EVIDENCE-LADDER.md
+          grep -q '{GSNPSID, GHWCFG1, GHWCFG2, GHWCFG3, GHWCFG4}' docs/EVIDENCE-LADDER.md
+          grep -q 'unmap_done_mapping_payload_reads=ZERO' r1a-device/README.md
+          grep -q 'CONTROLLER_SIGNATURE_COMPLETE' docs/hardware/PI-ZERO-2W-COMMANDS.md
+          grep -q 'rk-controller-signature-raw.txt' docs/hardware/TINKER-BOARD-S-COMMANDS.md
+
+      - name: Commit canonical specification
+        run: |
+          set -euxo pipefail
+          git config user.name 'gsmarcil'
+          git config user.email '116014240+gsmarcil@users.noreply.github.com'
+          git add docs/EVIDENCE-LADDER.md docs/RUNTIME-RUNBOOK.md \
+                  docs/hardware/PI-ZERO-2W-COMMANDS.md \
+                  docs/hardware/TINKER-BOARD-S-COMMANDS.md \
+                  r1a-device/README.md
+          git diff --cached --check
+          git commit -m 'docs: freeze reset evidence controls and controller signature'
+          git push origin HEAD:main
