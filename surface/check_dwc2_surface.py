@@ -2,8 +2,8 @@
 """Fail-closed source-surface scanner for the DWC2 R1 lifetime hypothesis.
 
 This is deliberately a SOURCE-SHAPE classifier, not an affected-version or
-security-impact oracle.  It answers whether a tree still contains the source
-relationships that keep the runtime hypothesis alive.  Runtime reachability,
+security-impact oracle. It answers whether a tree still contains the source
+relationships that keep the runtime hypothesis alive. Runtime reachability,
 post-unmap issue, commit, attacker control, and impact remain separate facts.
 """
 from __future__ import annotations
@@ -16,20 +16,54 @@ from pathlib import Path
 
 
 def function_body(text: str, name: str) -> str:
-    m = re.search(r"\b" + re.escape(name) + r"\s*\([^;]*?\)\s*\{", text, re.S)
-    if not m:
-        raise ValueError(f"function not found: {name}")
-    start = text.find("{", m.start())
-    depth = 0
-    for i in range(start, len(text)):
-        c = text[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[m.start(): i + 1]
-    raise ValueError(f"unterminated function: {name}")
+    """Return a real function definition, rejecting comments/calls/prototypes."""
+    for m in re.finditer(r"\b" + re.escape(name) + r"\s*\(", text):
+        open_paren = text.find("(", m.start())
+        depth = 0
+        close_paren = None
+        for i in range(open_paren, len(text)):
+            c = text[i]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    close_paren = i
+                    break
+        if close_paren is None:
+            continue
+
+        j = close_paren + 1
+        while j < len(text) and text[j].isspace():
+            j += 1
+        if j >= len(text) or text[j] != "{":
+            continue
+
+        # A call inside a control expression can also be followed eventually by
+        # a brace, but its immediate post-')' token is not '{'.  At this point
+        # the candidate has declaration shape.  Reject preprocessor/comment
+        # text by requiring a plausible declaration prefix on the same logical
+        # declaration, not '*' comment leaders.
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        prefix = text[line_start:m.start()].lstrip()
+        if prefix.startswith("*") or prefix.startswith("//"):
+            continue
+
+        brace = j
+        bdepth = 0
+        for k in range(brace, len(text)):
+            c = text[k]
+            if c == "{":
+                bdepth += 1
+            elif c == "}":
+                bdepth -= 1
+                if bdepth == 0:
+                    # Include a small declaration prefix so diagnostics remain
+                    # recognizable, but never let a prior comment occurrence
+                    # become the selected body.
+                    decl_start = text.rfind("\n", 0, line_start - 1) + 1
+                    return text[decl_start:k + 1]
+    raise ValueError(f"function definition not found: {name}")
 
 
 def ordered(body: str, *needles: str) -> bool:
@@ -63,7 +97,7 @@ def scan(root: Path, label: str, commit: str) -> dict[str, str]:
     generic_unmap = function_body(udc_core, "usb_gadget_unmap_request_by_dev")
 
     # Source primitive: timeout branches warn, then the function still reaches
-    # endpoint disable programming.  This deliberately does not claim the
+    # endpoint disable programming. This deliberately does not claim the
     # timeout is reachable on a real controller.
     stop_c = compact(stop)
     timeout_markers = (
