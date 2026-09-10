@@ -46,7 +46,10 @@ jobs:
           test "$(git rev-parse HEAD)" = "${SRC_COMMIT}"
       - name: Fail-closed source-shape scan
         run: |
+          set -euo pipefail
+          out="surface-${{ matrix.label }}.csv"
           python3 surface/check_dwc2_surface.py linux \
             --label '${{ matrix.label }}' \
             --commit '${{ matrix.commit }}' \
-            --csv | tee "surface-${{ matrix.label }}.csv"
+            --csv > "$out"
+          cat "$out"
