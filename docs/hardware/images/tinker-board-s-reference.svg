@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">ASUS Tinker Board S hardware reference</title>
+  <desc id="desc">Repository-local schematic identification image for the original ASUS Tinker Board S. Not to scale and not an electrical drawing.</desc>
+  <rect width="1200" height="620" fill="#f7f7f7"/>
+  <text x="55" y="62" font-family="sans-serif" font-size="34" font-weight="700" fill="#222">ASUS Tinker Board S — hardware reference</text>
+  <text x="55" y="96" font-family="sans-serif" font-size="18" fill="#555">Original Tinker Board S profile; R2.0 must be treated as a distinct purchase revision.</text>
+  <g transform="translate(85,145)">
+    <rect x="0" y="0" width="690" height="390" rx="22" fill="#1c77b8" stroke="#12527f" stroke-width="6"/>
+    <circle cx="42" cy="42" r="13" fill="#f7f7f7" stroke="#555" stroke-width="3"/>
+    <circle cx="648" cy="42" r="13" fill="#f7f7f7" stroke="#555" stroke-width="3"/>
+    <circle cx="42" cy="348" r="13" fill="#f7f7f7" stroke="#555" stroke-width="3"/>
+    <circle cx="648" cy="348" r="13" fill="#f7f7f7" stroke="#555" stroke-width="3"/>
+    <rect x="270" y="130" width="150" height="125" rx="8" fill="#333"/>
+    <text x="345" y="179" text-anchor="middle" font-family="monospace" font-size="21" fill="#fff">RK3288</text>
+    <text x="345" y="207" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#ddd">4 × Cortex-A17</text>
+    <text x="345" y="231" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#ddd">Mali-T760/T764 class</text>
+    <rect x="455" y="116" width="110" height="78" rx="5" fill="#5e5e5e"/>
+    <text x="510" y="160" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#fff">eMMC 16 GB</text>
+    <g fill="#d8c270" stroke="#8f7c2d" stroke-width="1">
+      <rect x="90" y="35" width="470" height="42" rx="3" fill="#284f6d" stroke="#d8c270" stroke-width="2"/>
+      <text x="325" y="62" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#fff">40-pin GPIO header</text>
+    </g>
+    <rect x="0" y="120" width="36" height="76" fill="#c6c6c6" stroke="#666" stroke-width="2"/>
+    <text x="22" y="233" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#fff" transform="rotate(-90 22 233)">microSD</text>
+    <rect x="160" y="360" width="96" height="30" fill="#c4c4c4" stroke="#666" stroke-width="2"/>
+    <text x="208" y="342" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#fff">Micro-USB power/data</text>
+    <rect x="300" y="360" width="118" height="30" fill="#c4c4c4" stroke="#666" stroke-width="2"/>
+    <text x="359" y="342" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#fff">HDMI</text>
+    <rect x="640" y="112" width="50" height="70" fill="#c4c4c4" stroke="#666" stroke-width="2"/>
+    <rect x="640" y="192" width="50" height="70" fill="#c4c4c4" stroke="#666" stroke-width="2"/>
+    <rect x="640" y="272" width="50" height="70" fill="#c4c4c4" stroke="#666" stroke-width="2"/>
+    <text x="623" y="220" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#fff" transform="rotate(-90 623 220)">USB 2.0 ×4 / GbE edge</text>
+    <rect x="510" y="300" width="56" height="34" fill="#ddd" stroke="#777" stroke-width="2"/>
+    <text x="538" y="293" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#fff">CSI/DSI</text>
+  </g>
+  <g transform="translate(825,150)" font-family="sans-serif" fill="#222">
+    <text x="0" y="0" font-size="22" font-weight="700">Campaign identifiers</text>
+    <text x="0" y="42" font-size="18">• Rockchip RK3288</text>
+    <text x="0" y="76" font-size="18">• 2 GB dual-channel LPDDR3</text>
+    <text x="0" y="110" font-size="18">• 16 GB onboard eMMC</text>
+    <text x="0" y="144" font-size="18">• microSD + 4 × USB 2.0</text>
+    <text x="0" y="178" font-size="18">• Micro-USB 5 V / 2–3 A</text>
+    <text x="0" y="212" font-size="18">• ~85.6 × 54 mm</text>
+    <text x="0" y="258" font-size="19" font-weight="700">Pinned Linux source</text>
+    <text x="0" y="292" font-size="17">usb@ff580000 · snps,dwc2</text>
+    <text x="0" y="322" font-size="17">dr_mode = otg · board enables usb_otg</text>
+    <text x="0" y="368" font-size="19" font-weight="700">Runtime still decides</text>
+    <text x="0" y="402" font-size="17">B_PERIPHERAL · GHWCFG4 · g_dma_desc</text>
+    <text x="0" y="432" font-size="17">LPAE/SWIOTLB · direct/bounce topology</text>
+  </g>
+  <text x="55" y="588" font-family="sans-serif" font-size="15" fill="#666">Repository-local visual derived from public vendor and pinned Linux source facts. Not a vendor photograph; not a wiring, connector-current, or mechanical engineering drawing.</text>
+</svg>
