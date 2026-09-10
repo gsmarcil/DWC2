@@ -1,0 +1,158 @@
+name: PREHW reset-safe R1A v4 check
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  patch-and-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc
+
+      - name: Fetch pinned Linux tree
+        run: |
+          set -euxo pipefail
+          git init linux
+          cd linux
+          git remote add origin https://github.com/torvalds/linux.git
+          git fetch --depth=1 origin f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+
+      - name: Apply preserved reset-safe v3 observer
+        run: |
+          set -euxo pipefail
+          cd linux
+          git apply --check ../r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v3.patch
+          git apply ../r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v3.patch
+
+      - name: Sanitize UNMAP_DONE post-lifetime event
+        run: python3 .github/scripts/prehw_reset_v4.py
+
+      - name: Semantic fail-closed checks
+        run: |
+          set -euxo pipefail
+          cd linux
+          git diff --check
+
+          ADDED="$(git diff -U0 | grep '^+' | grep -v '^+++' || true)"
+          if printf '%s\n' "$ADDED" | grep -E 'dwc2_(write|set_bit).*DOEPINT'; then
+            echo 'FAIL: instrumentation adds a DOEPINT write'
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('drivers/usb/dwc2/gadget.c').read_text()
+          a = s.index('static void dwc2_r1_emit(')
+          b = s.index('static void dwc2_r1_measure_mapped(', a)
+          body = s[a:b]
+
+          guard_start = body.index('if (stage != DWC2_R1_UNMAP_DONE) {')
+          guard_end = body.index('\n\t}\n\n\tif (!hs_ep->dir_in)', guard_start)
+          guarded = body[guard_start:guard_end]
+          post_guard = body[guard_end:]
+
+          dangerous = (
+              'hs_req->r1_dma',
+              'hs_req->r1_length',
+              'hs_req->req.actual',
+              'hs_req->req.status',
+              'hs_req->req.dma_mapped',
+          )
+          for token in dangerous:
+              assert token in guarded, token
+              assert token not in post_guard, token
+
+          assert 'req->buf' not in body
+          assert 'dma_sync_' not in body
+          assert 'dma_map_' not in body
+          assert 'dma_unmap_' not in body
+
+          c = s.index('static void dwc2_hsotg_complete_request(')
+          d = s.index('/*\n * dwc2_gadget_complete_isoc_request_ddma', c)
+          complete = s[c:d]
+          u = complete.index('dwc2_hsotg_unmap_dma(hsotg, hs_ep, hs_req);')
+          h = complete.index('dwc2_hsotg_handle_unaligned_buf_complete', u)
+          after_u = complete[u:h]
+          assert 'DWC2_R1_UNMAP_DONE' in after_u
+          assert 'req.buf' not in after_u
+          assert 'dma_sync_' not in after_u
+          assert after_u.count('dwc2_hsotg_unmap_dma(') == 1
+
+          # Reset lineage capture stays before disconnect/kill.
+          r = s.index('dwc2_r1_measure_reset_entry(hsotg, gintsts);')
+          disc = s.index('dwc2_hsotg_disconnect(hsotg);', r)
+          assert r < disc
+          PY
+
+      - name: Build with measurement disabled
+        run: |
+          set -euxo pipefail
+          cd linux
+          make defconfig
+          scripts/config --enable USB
+          scripts/config --enable USB_GADGET
+          scripts/config --enable USB_DWC2
+          scripts/config --enable USB_DWC2_DUAL_ROLE
+          scripts/config --enable TRACING
+          scripts/config --disable USB_DWC2_R1_MEASURE
+          make olddefconfig
+          grep '^# CONFIG_USB_DWC2_R1_MEASURE is not set' .config
+          make -j2 drivers/usb/dwc2/
+
+      - name: Build with measurement enabled
+        run: |
+          set -euxo pipefail
+          cd linux
+          make clean
+          scripts/config --enable USB_DWC2_R1_MEASURE
+          make olddefconfig
+          grep '^CONFIG_USB_DWC2_R1_MEASURE=y' .config
+          make -j2 drivers/usb/dwc2/
+
+      - name: Package standalone v4 patch
+        run: |
+          set -euxo pipefail
+          cd linux
+          git add -N drivers/usb/dwc2/trace-r1.h
+          git diff --binary > ../R1A-RESET-INSTRUMENTATION-v4.patch
+          test -s ../R1A-RESET-INSTRUMENTATION-v4.patch
+          grep -q '^diff --git a/drivers/usb/dwc2/trace-r1.h b/drivers/usb/dwc2/trace-r1.h' ../R1A-RESET-INSTRUMENTATION-v4.patch
+
+          git worktree add --detach ../linux-verify HEAD
+          cd ../linux-verify
+          git apply --check ../R1A-RESET-INSTRUMENTATION-v4.patch
+          git apply ../R1A-RESET-INSTRUMENTATION-v4.patch
+          git diff --check
+
+      - name: Write receipt
+        run: |
+          set -euxo pipefail
+          {
+            echo "kernel_pin=f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8"
+            echo "v3_patch_sha256=$(sha256sum r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v3.patch | awk '{print $1}')"
+            echo "workflow_commit=${GITHUB_SHA}"
+            echo "standalone_apply=PASS"
+            echo "build_measurement_disabled=PASS"
+            echo "build_measurement_enabled=PASS"
+            echo "semantic_fail_closed_checks=PASS"
+            echo "unmap_done_mapping_payload_reads=ZERO"
+            sha256sum R1A-RESET-INSTRUMENTATION-v4.patch
+          } > R1A-RESET-INSTRUMENTATION-v4.RECEIPT.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r1a-reset-instrumentation-v4
+          path: |
+            R1A-RESET-INSTRUMENTATION-v4.patch
+            R1A-RESET-INSTRUMENTATION-v4.RECEIPT.txt
