@@ -6,6 +6,8 @@ Run PRIMARY-A R1A `SET_CONFIGURATION(0)` first. Escalate to nonzero configuratio
 
 PRIMARY-A requires a host capable of issuing the raw control trigger while its own Bulk OUT payload is still outstanding. This is a self-imposed timing race and is a required capability, not an assumed property.
 
+Reset/disconnect handling is a separate PRIMARY-A branch. It must not inherit the endpoint-stop EPDIS predicate when the source path does not execute `dwc2_hsotg_ep_stop_xfr()`.
+
 ## Preflight
 
 1. Boot the exact frozen observer image.
@@ -49,7 +51,9 @@ program_generation
 endpoint
 ```
 
-`mapping_generation` increments at each successful map. `program_generation` is separate and increments each time the active OUT request is programmed into the endpoint/DMA state for that lineage. `dma_addr` is diagnostic only.
+`mapping_generation` increments at each successful map. `program_generation` is separate and increments only at the `DOEPCTL.EPENA` write that hands the active OUT request to hardware. A `DOEPDMA` write is recorded as an associated field but does not increment the generation. `dma_addr` is diagnostic only.
+
+The observer also maintains `epint_generation[endpoint]`, incremented at entry to `dwc2_hsotg_epint()` for the relevant OUT endpoint.
 
 ### Measurement path must not modify DOEPINT
 
@@ -64,9 +68,24 @@ DOEPTSIZ
 request_generation
 mapping_generation
 program_generation
+epint_generation
 ```
 
 Any existing driver-side W1C clear of `EPDISBLD` between this PRE observation and the RESULT observation must be observed/attributed. If such a clear occurs and cannot itself be tied to a positive terminal result for the same lineage, the attempt is `R1A_AMBIGUOUS`.
+
+### Do not perturb the wait
+
+The measurement patch must not add register reads, tracepoints, branches, delays, counters, or other work inside the polling body of `dwc2_hsotg_wait_bit_set()` or otherwise alter the number/timing of its iterations. Record only immediately before the existing EPDIS action and immediately after the natural wait returns.
+
+No instrumentation change is acceptable if it changes:
+
+```text
+poll cadence
+poll count
+timeout duration
+wait return semantics
+ordering of the existing EPDIS / W1C / unmap path
+```
 
 ### Completion witness is the completion path, not a register absence
 
@@ -101,14 +120,34 @@ Definitions:
 
 - `fresh_ack`: `EPDISBLD` was known clear immediately before EPDIS and a fresh assertion is observed before the natural wait deadline and before U.
 - `timeout_then_ack_before_U`: the driver's natural wait timed out, but a fresh assertion is observed after the timeout and before U.
-- `timeout_no_ack`: the natural wait timed out and no fresh assertion is observed before U.
-- `ambiguous`: stale-high PRE state, intervening/unattributed W1C clear, generation mismatch, event loss, or any inability to distinguish a fresh assertion.
+- `timeout_no_ack`: the natural wait timed out, no fresh assertion is observed before U, and `epint_generation` is unchanged from `WAIT_RETURN` to `PRE_U`.
+- `ambiguous`: stale-high PRE state, intervening/unattributed W1C clear, a changed `epint_generation` in the `WAIT_RETURN -> PRE_U` interval, generation mismatch, event loss, or any inability to distinguish a fresh assertion.
 
 Both `fresh_ack` and `timeout_then_ack_before_U` kill R1A for that linked attempt. A warning emitted by the driver's timeout path is therefore never classified as R1A success without checking for a late acknowledgement before U.
 
-## R1A_PROVEN
+### WAIT_RETURN -> PRE_U cleanliness
 
-A linked PRIMARY-A attempt may be classified `R1A_PROVEN` only when all frozen conditions in `EVIDENCE-LADDER.md` hold, including:
+At the natural wait return, record:
+
+```text
+WAIT_RETURN.epint_generation
+WAIT_RETURN.DOEPINT
+WAIT_RETURN.DOEPTSIZ
+```
+
+At the last read-only observation before U, record:
+
+```text
+PRE_U.epint_generation
+PRE_U.DOEPINT
+PRE_U.DOEPTSIZ
+```
+
+If the two `epint_generation` values differ, `timeout_no_ack` cannot be promoted; the attempt is `R1A_AMBIGUOUS`. This prevents an endpoint-interrupt handler from asserting/clearing a witness invisibly between the two samples.
+
+## Endpoint-stop R1A_PROVEN
+
+A linked PRIMARY-A endpoint-stop attempt may be classified `R1A_PROVEN` only when all frozen conditions in `EVIDENCE-LADDER.md` hold, including:
 
 ```text
 MAP -> PROGRAMMED for one lineage
@@ -118,6 +157,7 @@ mapping_generation unchanged
 program_generation unchanged after the load-bearing PROGRAMMED event
 EPDISBLD clear immediately before EPDIS
 EPDIS_RESULT == timeout_no_ack
+WAIT_RETURN.epint_generation == PRE_U.epint_generation
 no same-lineage completion-path event before U
 UNMAP_BEGIN -> UNMAP_DONE on the same lineage
 no intervening map or endpoint re-program event
@@ -128,9 +168,21 @@ lost == 0
 
 This classification means software proceeded to unmap the same request/mapping/program lineage without an observed same-lineage completion and without a fresh positive controller acknowledgement that endpoint disable completed. It is not a direct hardware-ownership bit and must not be described as one.
 
+## Reset/disconnect PRIMARY-A branch
+
+For a reset/disconnect branch in which source flow reaches `dwc2_hsotg_disconnect()` and request retirement without `dwc2_hsotg_ep_stop_xfr()`:
+
+```text
+EPDIS_ASSERT = NOT_REACHED
+WAIT_RETURN = NOT_REACHED
+EPDIS_RESULT = NOT_APPLICABLE
+```
+
+These missing events are expected and do not make the instrumentation incomplete. The positive terminal kill available there is a same-lineage completion-path event before U. A branch-specific positive criterion for surviving R1A must be separately frozen before promotion; until then, reset/disconnect evidence may be `SUPPORTED`, `DEAD`, or `AMBIGUOUS`, but must not borrow the endpoint-stop `timeout_no_ack` criterion.
+
 ## R1A_DEAD
 
-A linked attempt is `R1A_DEAD` if either positive terminal condition occurs before U:
+A linked endpoint-stop attempt is `R1A_DEAD` if either positive terminal condition occurs before U:
 
 ```text
 same-lineage completion-path event
@@ -147,6 +199,8 @@ or:
 ```text
 EPDIS_RESULT == timeout_then_ack_before_U
 ```
+
+For reset/disconnect, same-lineage completion before U is the currently frozen positive terminal kill.
 
 This symmetry is mandatory. If the observer cannot distinguish PROVEN from DEAD under the frozen rules, the result is `R1A_AMBIGUOUS` and cannot be promoted.
 
@@ -175,7 +229,7 @@ records[S1.count:S2.count]
 - Any attempt that fired the campaign trigger but is invalid makes the batch unusable for negative aggregation unless attribution proves it contributed no candidate.
 - Foreign matching controls/teardowns make the batch ineligible.
 - `lost > 0`, non-atomic snapshots, reset-generation changes, witness mismatch or epoch mismatch all fail closed.
-- stale PRE `EPDISBLD`, any unattributed W1C clear between PRE and RESULT, missing completion-path coverage, or lineage mismatch makes the linked attempt ambiguous.
+- stale PRE `EPDISBLD`, any unattributed W1C clear between PRE and RESULT, changed `epint_generation` in `WAIT_RETURN -> PRE_U`, missing completion-path coverage, or lineage mismatch makes the linked attempt ambiguous.
 
 ## Required artifacts
 
@@ -184,9 +238,11 @@ records[S1.count:S2.count]
 - holder event log with session and boot identity;
 - host harness log / manifest;
 - per-attempt request/mapping/program lineage;
+- associated `DOEPDMA` value for each `program_generation`;
 - `EPDIS_ASSERT` raw `DOEPCTL` / `DOEPINT` / `DOEPTSIZ`;
 - completion-path events for the linked request;
 - PRE/RESULT `XFRSIZ` plus delta;
+- `WAIT_RETURN` and `PRE_U` endpoint-interrupt generations;
 - any observed W1C clear event between PRE and RESULT;
 - four-state `EPDIS_RESULT`;
 - `UNMAP_BEGIN` / `UNMAP_DONE` for the same lineage;
@@ -194,9 +250,24 @@ records[S1.count:S2.count]
 - final gate JSON and generated verdict;
 - SHA256 for every artifact.
 
+## Instrumentation semantic review gate
+
+Before any hardware epoch, the measurement patch must pass all six checks:
+
+```text
+1  no added DOEPINT write
+2  no changed teardown ordering
+3  no extra map/unmap
+4  no hidden endpoint re-programming
+5  no new runtime claim encoded in instrumentation
+6  no change in natural wait timing/cadence/iteration semantics
+```
+
+Failure of any item blocks the instrument regardless of whether it compiles.
+
 ## Interpretation
 
-`R1A_PROVEN` closes only the observable PRIMARY-A statement defined above for its linked attempt. It does not by itself prove real post-U device access, `D_issue`, `D_commit`, or security impact.
+`R1A_PROVEN` closes only the observable branch-specific PRIMARY-A statement defined above for its linked attempt. It does not by itself prove real post-U device access, `D_issue`, `D_commit`, or security impact.
 
 `UNMAP_DONE` is an observation point. `same_mapping_generation`, `same program_generation`, and `NO_REMAP` are attribution controls. They are not vertical proof steps.
 
