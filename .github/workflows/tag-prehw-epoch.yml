@@ -1,0 +1,33 @@
+name: tag-prehw-epoch
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Freeze EPOCH-PREHW-1 at verified G1 commit
+        env:
+          TARGET_SHA: 15fca0f37c6080f6ab818bcfaed19f46cbb6cf77
+          TAG: EPOCH-PREHW-1
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          existing=$(git ls-remote --tags origin "refs/tags/${TAG}" | awk '{print $1}')
+          if [ -n "$existing" ]; then
+            test "$existing" = "$TARGET_SHA"
+            echo "$TAG already points to $TARGET_SHA"
+            exit 0
+          fi
+          git tag "$TAG" "$TARGET_SHA"
+          git push origin "refs/tags/${TAG}"
