@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   apply-spec:
-    if: github.event.head_commit.message != 'docs: freeze reset evidence controls and controller signature'
+    if: ${{ github.event.head_commit.message != 'docs: freeze reset evidence controls and controller signature' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
