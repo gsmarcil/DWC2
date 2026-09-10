@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">Raspberry Pi Zero 2 W hardware reference</title>
+  <desc id="desc">Repository-local schematic identification image for Raspberry Pi Zero 2 W. Not to scale and not an electrical drawing.</desc>
+  <rect width="1200" height="560" fill="#f7f7f7"/>
+  <text x="55" y="62" font-family="sans-serif" font-size="34" font-weight="700" fill="#222">Raspberry Pi Zero 2 W — hardware reference</text>
+  <text x="55" y="96" font-family="sans-serif" font-size="18" fill="#555">Identification schematic — not to scale; verify the exact physical unit at first boot.</text>
+  <g transform="translate(95,145)">
+    <rect x="0" y="0" width="650" height="300" rx="24" fill="#2e8b57" stroke="#1d5d3a" stroke-width="6"/>
+    <circle cx="34" cy="34" r="12" fill="#f7f7f7" stroke="#555" stroke-width="3"/>
+    <circle cx="616" cy="34" r="12" fill="#f7f7f7" stroke="#555" stroke-width="3"/>
+    <circle cx="34" cy="266" r="12" fill="#f7f7f7" stroke="#555" stroke-width="3"/>
+    <circle cx="616" cy="266" r="12" fill="#f7f7f7" stroke="#555" stroke-width="3"/>
+    <rect x="225" y="96" width="140" height="110" rx="8" fill="#3d3d3d"/>
+    <text x="295" y="142" text-anchor="middle" font-family="monospace" font-size="18" fill="#fff">RP3A0</text>
+    <text x="295" y="168" text-anchor="middle" font-family="monospace" font-size="14" fill="#ddd">BCM2710A1</text>
+    <rect x="395" y="67" width="128" height="85" rx="6" fill="#b8bcc2" stroke="#777" stroke-width="3"/>
+    <text x="459" y="114" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#333">RF shield</text>
+    <g fill="#d8c270" stroke="#8f7c2d" stroke-width="1">
+      <circle cx="120" cy="42" r="5"/><circle cx="142" cy="42" r="5"/><circle cx="164" cy="42" r="5"/><circle cx="186" cy="42" r="5"/><circle cx="208" cy="42" r="5"/><circle cx="230" cy="42" r="5"/><circle cx="252" cy="42" r="5"/><circle cx="274" cy="42" r="5"/><circle cx="296" cy="42" r="5"/><circle cx="318" cy="42" r="5"/><circle cx="340" cy="42" r="5"/><circle cx="362" cy="42" r="5"/><circle cx="384" cy="42" r="5"/><circle cx="406" cy="42" r="5"/><circle cx="428" cy="42" r="5"/><circle cx="450" cy="42" r="5"/><circle cx="472" cy="42" r="5"/><circle cx="494" cy="42" r="5"/><circle cx="516" cy="42" r="5"/><circle cx="538" cy="42" r="5"/>
+      <circle cx="120" cy="62" r="5"/><circle cx="142" cy="62" r="5"/><circle cx="164" cy="62" r="5"/><circle cx="186" cy="62" r="5"/><circle cx="208" cy="62" r="5"/><circle cx="230" cy="62" r="5"/><circle cx="252" cy="62" r="5"/><circle cx="274" cy="62" r="5"/><circle cx="296" cy="62" r="5"/><circle cx="318" cy="62" r="5"/><circle cx="340" cy="62" r="5"/><circle cx="362" cy="62" r="5"/><circle cx="384" cy="62" r="5"/><circle cx="406" cy="62" r="5"/><circle cx="428" cy="62" r="5"/><circle cx="450" cy="62" r="5"/><circle cx="472" cy="62" r="5"/><circle cx="494" cy="62" r="5"/><circle cx="516" cy="62" r="5"/><circle cx="538" cy="62" r="5"/>
+    </g>
+    <rect x="55" y="112" width="36" height="92" fill="#b8bcc2" stroke="#666" stroke-width="3"/>
+    <text x="72" y="226" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#fff" transform="rotate(-90 72 226)">microSD</text>
+    <rect x="170" y="270" width="76" height="30" fill="#c4c4c4" stroke="#666" stroke-width="2"/>
+    <rect x="280" y="270" width="76" height="30" fill="#c4c4c4" stroke="#666" stroke-width="2"/>
+    <rect x="405" y="270" width="92" height="30" fill="#c4c4c4" stroke="#666" stroke-width="2"/>
+    <text x="208" y="254" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#fff">PWR micro-USB</text>
+    <text x="318" y="254" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#fff">USB OTG</text>
+    <text x="451" y="254" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#fff">mini HDMI</text>
+    <rect x="555" y="105" width="32" height="92" fill="#ddd" stroke="#777" stroke-width="2"/>
+    <text x="571" y="222" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#fff" transform="rotate(-90 571 222)">CSI-2</text>
+  </g>
+  <g transform="translate(805,150)" font-family="sans-serif" fill="#222">
+    <text x="0" y="0" font-size="22" font-weight="700">Campaign identifiers</text>
+    <text x="0" y="42" font-size="18">• RP3A0 SiP / BCM2710A1 die</text>
+    <text x="0" y="76" font-size="18">• 512 MB LPDDR2</text>
+    <text x="0" y="110" font-size="18">• 1 × USB 2.0 OTG data port</text>
+    <text x="0" y="144" font-size="18">• separate micro-USB power input</text>
+    <text x="0" y="178" font-size="18">• 65 × 30 mm form factor</text>
+    <text x="0" y="224" font-size="19" font-weight="700">Runtime still decides</text>
+    <text x="0" y="258" font-size="17">UDC identity · role · GHWCFG4</text>
+    <text x="0" y="288" font-size="17">g_dma · g_dma_desc · DMA topology</text>
+  </g>
+  <text x="55" y="520" font-family="sans-serif" font-size="15" fill="#666">Repository-local visual derived from public vendor specifications. It is not a vendor photograph and must not be used as wiring or dimensional engineering documentation.</text>
+</svg>
