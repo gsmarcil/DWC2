@@ -22,14 +22,15 @@ jobs:
           git fetch --depth=1 origin f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
-      - name: Apply-check instrumentation
+      - name: Apply fail-closed instrumentation transform
         run: |
           set -euxo pipefail
+          python3 instr/apply_r1_measure.py linux
           cd linux
-          git apply --check ../instr/0001-dwc2-r1-linear-lifetime-tracepoints.patch
-          git apply ../instr/0001-dwc2-r1-linear-lifetime-tracepoints.patch
           git diff --check
           grep -n 'CONFIG_USB_DWC2_R1_MEASURE\|DWC2_R1_UNMAP_DONE\|DWC2_R1_PROGRAMMED' drivers/usb/dwc2/{Kconfig,core.h,gadget.c,trace-r1.h}
+          git diff -- drivers/usb/dwc2/ > ../r1-measure.generated.patch
+          test -s ../r1-measure.generated.patch
       - name: Configure measurement build
         run: |
           set -euxo pipefail
@@ -47,4 +48,12 @@ jobs:
         run: |
           set -euxo pipefail
           cd linux
+          make -j2 drivers/usb/dwc2/
+      - name: Verify normal build excludes measurement state
+        run: |
+          set -euxo pipefail
+          cd linux
+          scripts/config --disable USB_DWC2_R1_MEASURE
+          make olddefconfig
+          grep '^# CONFIG_USB_DWC2_R1_MEASURE is not set' .config
           make -j2 drivers/usb/dwc2/
