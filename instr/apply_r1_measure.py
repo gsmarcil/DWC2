@@ -118,7 +118,7 @@ TRACE_EVENT(dwc2_r1_lifetime,
 #endif /* _TRACE_DWC2_R1_H */
 
 #undef TRACE_INCLUDE_PATH
-#define TRACE_INCLUDE_PATH .
+#define TRACE_INCLUDE_PATH drivers/usb/dwc2
 #undef TRACE_INCLUDE_FILE
 #define TRACE_INCLUDE_FILE trace-r1
 
