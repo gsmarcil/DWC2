@@ -1,0 +1,50 @@
+name: prehw-instr-verify
+
+on:
+  push:
+    branches: [ prehw-instr ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  patch-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned Linux tree
+        run: |
+          set -euxo pipefail
+          git init linux
+          cd linux
+          git remote add origin https://github.com/torvalds/linux.git
+          git fetch --depth=1 origin f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+      - name: Apply-check instrumentation
+        run: |
+          set -euxo pipefail
+          cd linux
+          git apply --check ../instr/0001-dwc2-r1-linear-lifetime-tracepoints.patch
+          git apply ../instr/0001-dwc2-r1-linear-lifetime-tracepoints.patch
+          git diff --check
+          grep -n 'CONFIG_USB_DWC2_R1_MEASURE\|DWC2_R1_UNMAP_DONE\|DWC2_R1_PROGRAMMED' drivers/usb/dwc2/{Kconfig,core.h,gadget.c,trace-r1.h}
+      - name: Configure measurement build
+        run: |
+          set -euxo pipefail
+          cd linux
+          make defconfig
+          scripts/config --enable USB
+          scripts/config --enable USB_GADGET
+          scripts/config --enable USB_DWC2
+          scripts/config --enable USB_DWC2_DUAL_ROLE
+          scripts/config --enable TRACING
+          scripts/config --enable USB_DWC2_R1_MEASURE
+          make olddefconfig
+          grep -E '^CONFIG_(USB_DWC2|USB_DWC2_DUAL_ROLE|USB_DWC2_R1_MEASURE|TRACING)=' .config
+      - name: Build DWC2 with tracepoints enabled
+        run: |
+          set -euxo pipefail
+          cd linux
+          make -j2 drivers/usb/dwc2/
