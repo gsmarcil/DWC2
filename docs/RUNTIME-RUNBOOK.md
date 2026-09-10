@@ -219,17 +219,20 @@ RESET_ENTRY:
   request_generation
   mapping_generation
   program_generation
+  endpoint
   epint_generation
   raw DOEPINT
   raw DOEPTSIZ
 
 PRE_U:
-  same lineage fields
+  same reset/request/map/program/endpoint lineage
+  epint_generation
   raw DOEPINT
   raw DOEPTSIZ
 
 UNMAP_DONE:
-  same lineage fields
+  same reset/request/map/program/endpoint lineage
+  epint_generation
   raw DOEPINT
   raw DOEPTSIZ
 ```
@@ -239,6 +242,15 @@ The reset observer must not write `DOEPINT`, add a stop/NAK, change IRQ ordering
 `UNMAP_DONE` is post-U and is register-only apart from stable lineage metadata. Its mapping/request-payload slots must be zero sentinels (`dma_addr`, `program_dma`, `length`, `actual`, `result`, `status`, `dma_mapped` all zero). After the real unmap returns, the observer may read only stable lineage/endpoint bookkeeping and the raw `DOEPCTL` / `DOEPINT` / `DOEPTSIZ` MMIO needed for the reset discriminator; it must not read `req->dma`/`req->buf`, touch the request buffer, call `dma_sync_*`, remap, or add a memory-side witness.
 
 ### Mandatory three-arm reset discriminator
+
+The reset campaign order is fixed:
+
+```text
+controller signature
+    -> CTRL-IDLE validity/pass
+    -> CTRL-COMPLETED validity/pass
+    -> CAMPAIGN-LIVE
+```
 
 Run and preserve all three arms under the same observer/controller/configuration fingerprint:
 
@@ -250,15 +262,41 @@ CTRL-IDLE
 CTRL-COMPLETED
   same transfer class completes naturally first
   positive natural completion witness precedes reset
+  RESET_ENTRY.XferCompl = 0
   reset follows after a recorded, pre-frozen interval
-  detects late/stale completion reporting
+  proves the completion bit was actually clear before reset,
+  then tests whether a fresh 0 -> 1 can appear anyway
 
 CAMPAIGN-LIVE
   same transfer class is positively outstanding at RESET_ENTRY
   tests the surviving reset branch
 ```
 
-`CTRL-COMPLETED` should show `XferCompl` already present at `RESET_ENTRY` when it has not been naturally W1C-serviced. If the normal endpoint interrupt cleared it before reset, the control remains usable for the stronger question: it must not produce a new post-reset `0 -> 1`. Any post-reset `0 -> 1` in either `CTRL-IDLE` or `CTRL-COMPLETED` makes the campaign transition non-discriminating and forces `R1A_AMBIGUOUS`. Freeze the control denominators, completed-to-reset interval, and completion witness before campaign execution.
+`CTRL-COMPLETED` is valid only when **both** its positive natural completion witness and `RESET_ENTRY.XferCompl=0` are present. If the bit is still high at `RESET_ENTRY`, or the completion witness is absent, the arm did not test the intended cleared-before-reset state: mark it `CONTROL_INVALID`, recalibrate/repeat it, and do not count it as clean. A valid `CTRL-COMPLETED` that later produces a new post-reset `0 -> 1` makes the campaign transition non-discriminating and forces `R1A_AMBIGUOUS`. Any post-reset `0 -> 1` in a valid `CTRL-IDLE` has the same effect. Freeze the control denominators, completed-to-reset interval, and completion witness before campaign execution.
+
+**Do not start or promote `CAMPAIGN-LIVE` if either control arm has not first produced a valid attempt.** Invalid controls stop the campaign gate; they are never converted into negative evidence.
+
+### Endpoint-safe event joining
+
+Do not join reset observations by timestamp/order alone. `kill_all_requests()` processes endpoints sequentially while the same controller lock is held, so another endpoint can generate events between a candidate endpoint's observations. A load-bearing reset transition must join:
+
+```text
+RESET_ENTRY
+PRE_U
+UNMAP_DONE
+```
+
+only when the complete tuple matches exactly:
+
+```text
+reset_generation
+request_generation
+mapping_generation
+program_generation
+endpoint
+```
+
+The trace event already carries `endpoint`; analysis must use it. `PRE_U.epint_generation` and `UNMAP_DONE.epint_generation` are compared only after that full endpoint+lineage join succeeds.
 
 Reset-specific interpretation is frozen as follows:
 
@@ -268,15 +306,17 @@ normal same-lineage XFERCOMPL_PATH before U
 
 RESET_ENTRY.XferCompl = 0
 and PRE_U.XferCompl = 1
-and same request/map/program generation
+and same reset/request/map/program/endpoint lineage
 and unchanged epint_generation
     -> fresh terminal completion before U
     -> R1A_DEAD
 
 PRE_U.XferCompl = 0
 and UNMAP_DONE.XferCompl = 1
-and same request/map/program generation
+and same reset/request/map/program/endpoint lineage
 and unchanged epint_generation
+and CTRL-IDLE valid+clean
+and CTRL-COMPLETED valid+clean
     -> RESET_POST_U_COMPLETION_PROGRESS
     -> positive evidence that software unmapped before the controller's terminal completion signal
     -> eligible for the reset-specific R1A promotion predicate
@@ -344,7 +384,8 @@ records[S1.count:S2.count]
 - Foreign matching controls/teardowns make the batch ineligible.
 - `lost > 0`, non-atomic snapshots, reset-generation changes, witness mismatch or epoch mismatch all fail closed.
 - stale PRE `EPDISBLD`, any unattributed W1C clear between PRE and RESULT, changed `epint_generation` in `WAIT_RETURN -> PRE_U`, missing completion-path coverage, or lineage mismatch makes the linked attempt ambiguous.
-- on reset/disconnect, failure to preserve the active lineage before `disconnect()` or ambiguity about a pending `XferCompl` makes the attempt ineligible for promotion.
+- on reset/disconnect, failure to preserve the active lineage before `disconnect()`, failure of the full reset/request/map/program/endpoint join, or ambiguity about a pending `XferCompl` makes the attempt ineligible for promotion.
+- `CTRL-IDLE` and `CTRL-COMPLETED` must each be valid under their frozen predicates before `CAMPAIGN-LIVE` begins; `CONTROL_INVALID` stops the reset campaign gate and is not a clean control.
 
 ## Required artifacts
 
@@ -361,7 +402,7 @@ records[S1.count:S2.count]
 - any observed W1C clear event between PRE and RESULT;
 - four-state `EPDIS_RESULT`;
 - `UNMAP_BEGIN` / `UNMAP_DONE` for the same lineage;
-- reset branch: raw `{GSNPSID, GHWCFG1, GHWCFG2, GHWCFG3, GHWCFG4}` controller signature, selected databook identity/applicability/result, `K_hw`, `CTRL-IDLE`, `CTRL-COMPLETED`, `CAMPAIGN-LIVE`, `reset_generation`, `RESET_ENTRY`, reset-safe `PRE_U`, and register-only reset-safe `UNMAP_DONE` raw `DOEPCTL`/`DOEPINT`/`DOEPTSIZ`;
+- reset branch: raw `{GSNPSID, GHWCFG1, GHWCFG2, GHWCFG3, GHWCFG4}` controller signature, selected databook identity/applicability/result, `K_hw`, valid `CTRL-IDLE`, valid `CTRL-COMPLETED` with prior natural completion witness and `RESET_ENTRY.XferCompl=0`, `CAMPAIGN-LIVE`, `reset_generation`, exact endpoint, `RESET_ENTRY`, reset-safe `PRE_U`, and register-only reset-safe `UNMAP_DONE` raw `DOEPCTL`/`DOEPINT`/`DOEPTSIZ`;
 - exact image/tool hashes and epoch block;
 - final gate JSON and generated verdict;
 - SHA256 for every artifact.
@@ -387,7 +428,8 @@ RESET-B  no SNAK/EPDIS/quiesce action is added by measurement
 RESET-C  reset IRQ ordering is unchanged
 RESET-D  UNMAP_DONE register snapshot occurs only after the real unmap returns
 RESET-E  UNMAP_DONE has zero mapping/request-payload reads and emits lineage + raw MMIO only
-RESET-F  both idle-reset and completed-then-reset controls are frozen before campaign promotion
+RESET-F  idle-reset and completed-then-reset controls are both valid before campaign promotion
+RESET-G  reset transitions are joined by identical reset/request/map/program/endpoint tuples, never time alone
 ```
 
 Failure of any item blocks the instrument regardless of whether it compiles.
