@@ -113,6 +113,12 @@ Therefore source reachability for HID interrupt OUT or UAC isochronous OUT does
 not inherit a Bulk-OUT runtime R1A result. Each transfer class would need its
 own runtime qualification before it could be described as runtime-affected.
 
+`f_uac1`/`f_uac2` isochronous OUT is also kept on the **PRIMARY-B surface**, not
+silently folded into PRIMARY-A. If PRIMARY-B (the isochronous/DDMA teardown
+hypothesis) later survives its own gates, those UAC rows become candidate
+surface for B. A positive PRIMARY-A Bulk OUT reset result does not promote
+them.
+
 ### Note on the bounce sub-path
 
 `dwc2_hsotg_handle_unaligned_buf_start:1283` allocates a driver-owned bounce
@@ -129,7 +135,7 @@ always ≥ 4-byte aligned) and is reachable from `u_ether` only where
 This axis is source-only. It records both a durable lower bound for the current
 shape and checked maintained-LTS points.
 
-### History bound
+### History bound and the 2018 ordering change
 
 The reset-to-disconnect link predates the current implementation shape:
 
@@ -143,15 +149,78 @@ dccf1bad4be7eaa096c1f3697bd37883f9a08ecb   2018-10-02
 
 4fe4f9fecc36956fd53c8edf96dd0c691ef98ff9   2018-12-11
     explicitly reverted the disconnect-body change back to
-    kill_all_requests(), while keeping endpoint disable in
-    core_init_disconnected()
+    kill_all_requests(), while retaining endpoint disable in
+    core_init_disconnected(..., true)
 ```
 
-The release-boundary check matters: `v4.20` still has the `ep_disable()` form
-inside `dwc2_hsotg_disconnect()`, while `v5.0` has the current
-`kill_all_requests()` form. Therefore the durable checked lower bound for the
-**current no-stop disconnect form** is `v5.0`; do not claim uninterrupted
-current-form coverage back to the older 2015 reset-link commit.
+The `4fe4f9fe` commit message is important because it states a **locking/sparse
+correctness** goal, not a DMA-quiescence tradeoff: it introduces
+`dwc2_hsotg_ep_disable_lock()`, removes internal lock acquisition from
+`dwc2_hsotg_ep_disable()`, and says the update eliminates sparse imbalance
+warnings. In the same commit it explicitly says that the changes in
+`dwc2_hsotg_disconnect()` are reverted, while endpoint disable for a USB reset
+is retained in `dwc2_hsotg_core_init_disconnected()`.
+
+At that exact commit, the reset IRQ ordering is:
+
+```text
+USBRST / RESETDET
+    -> dwc2_hsotg_disconnect(hsotg)
+         -> kill_all_requests(...)
+              -> complete_request(...)
+                   -> DMA unmap when using_dma()
+    -> clear device address
+    -> if BSESVLD && connected:
+         dwc2_hsotg_core_init_disconnected(hsotg, true)
+              -> dwc2_hsotg_ep_disable(...) for non-EP0 endpoints
+    -> later OEPINT / IEPINT handling
+```
+
+So the endpoint-disable operation was not removed from reset handling; it was
+**relocated to a point that executes after disconnect-time request retirement**.
+For the load-bearing ordering question, the source consequence is exact:
+
+```text
+before dccf1bad fix:
+    disconnect -> kill/retire
+
+dccf1bad:
+    disconnect -> ep_disable -> kill/retire
+
+4fe4f9fe and current form:
+    disconnect -> kill/retire/unmap
+    then core_init_disconnected(true) -> ep_disable
+```
+
+This is stronger than generic historical context: Linux carried a
+stop-before-retire form and then `4fe4f9fe` changed the ordering back while
+solving lock/annotation correctness. It is **not**, however, evidence that the
+maintainers knowingly accepted a DMA-lifetime bug or intentionally chose
+unmap-before-quiescence as a security tradeoff; the commit message does not say
+that. The strongest defensible report reading is therefore:
+
+> `4fe4f9fe` moved endpoint disable out of the disconnect retirement path as
+> part of a lock-flow/sparse fix, leaving USB-reset endpoint disable after
+> disconnect-time request retirement and DMA unmap.
+
+Any future fix proposal must account for the lock architecture introduced by
+`4fe4f9fe`; simply proposing to restore the old `dwc2_hsotg_disconnect() ->
+ep_disable()` implementation would ignore the regression that commit was
+written to fix.
+
+The durable version statement is commit-first, release-second:
+
+```text
+current no-stop disconnect form introduced by:
+    4fe4f9fecc36956fd53c8edf96dd0c691ef98ff9
+
+first released in:
+    v5.0
+```
+
+`v4.20` still has the `ep_disable()` form inside `dwc2_hsotg_disconnect()`,
+while `v5.0` has the current `kill_all_requests()` form. Do not describe
+`v4.20/v5.0` as the origin itself; the non-aging lower bound is the commit.
 
 ### Maintained LTS points
 
@@ -186,18 +255,19 @@ For all three checked heads, the same four load-bearing source facts hold:
 Verdict:
 
 ```text
-v5.0      checked lower bound of current no-stop disconnect form   PRESENT
-6.1.187   maintained LTS checked point                              PRESENT
-6.6.156   maintained LTS checked point                              PRESENT
-6.12.108  maintained LTS checked point                              PRESENT
-mainline pin f5a7e2ae...                                             PRESENT
+4fe4f9fe  origin commit of current no-stop disconnect form          PRESENT
+v5.0      first release carrying that form                           PRESENT
+6.1.187   maintained LTS checked point                               PRESENT
+6.6.156   maintained LTS checked point                               PRESENT
+6.12.108  maintained LTS checked point                               PRESENT
+mainline pin f5a7e2ae...                                              PRESENT
 ```
 
 `PRESENT` means the source-level ordering relevant to the hypothesis is still
 present; it does **not** mean byte-for-byte identity, runtime reachability on a
 particular board, post-unmap DMA, or a confirmed memory effect. The dated LTS
-heads are reproducibility points, while the lower-bound/history wording remains
-useful after those branches advance.
+heads are reproducibility points, while the commit-first lower-bound/history
+wording remains useful after those branches advance.
 
 These are upstream trees, not proof that every vendor/distro shipping kernel
 preserves the same code unchanged.
