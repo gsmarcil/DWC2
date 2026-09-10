@@ -16,7 +16,7 @@ jobs:
       - name: Install kernel build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc jq
 
       - name: Fetch pinned Linux tree
         run: |
@@ -29,11 +29,16 @@ jobs:
           test "$(git rev-parse HEAD)" = f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
 
       - name: Apply last build-green v1 measurement patch
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
           curl -L --fail --silent --show-error \
-            https://raw.githubusercontent.com/gsmarcil/DWC2/ccf49e5c0cf20f17bcc96465b2a3e37392cf49cb/instr/0001-dwc2-r1-linear-lifetime-tracepoints.patch \
-            -o v1.patch
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/gsmarcil/DWC2/contents/instr/0001-dwc2-r1-linear-lifetime-tracepoints.patch?ref=ccf49e5c0cf20f17bcc96465b2a3e37392cf49cb" \
+            | jq -r .content | tr -d '\n' | base64 -d > v1.patch
+          test -s v1.patch
           cd linux
           git apply --check ../v1.patch
           git apply ../v1.patch
