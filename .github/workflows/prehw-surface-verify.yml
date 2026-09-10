@@ -1,0 +1,52 @@
+name: prehw-surface-verify
+
+on:
+  push:
+    branches: [ prehw-surface ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-shape:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-6.1.y-2026-09-10
+            repo: gregkh/linux
+            commit: cf82dcca96346600c7068cf3f841335f9fa08f54
+          - label: linux-6.6.y-2026-09-10
+            repo: gregkh/linux
+            commit: 8b73de7da85fde281a385e0b26eda9bffd3ca477
+          - label: linux-6.12.y-2026-09-10
+            repo: gregkh/linux
+            commit: 064531c7e30cd67b79c0c694ac97f00c7796f4d6
+          - label: research-pin
+            repo: torvalds/linux
+            commit: f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+          - label: mainline-2026-09-10
+            repo: torvalds/linux
+            commit: 50d05c7c76c96b90462f24debacca971d2e86713
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch exact source commit
+        env:
+          SRC_REPO: ${{ matrix.repo }}
+          SRC_COMMIT: ${{ matrix.commit }}
+        run: |
+          set -euxo pipefail
+          git init linux
+          cd linux
+          git remote add origin "https://github.com/${SRC_REPO}.git"
+          git fetch --depth=1 origin "${SRC_COMMIT}"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "${SRC_COMMIT}"
+      - name: Fail-closed source-shape scan
+        run: |
+          python3 surface/check_dwc2_surface.py linux \
+            --label '${{ matrix.label }}' \
+            --commit '${{ matrix.commit }}' \
+            --csv | tee "surface-${{ matrix.label }}.csv"
