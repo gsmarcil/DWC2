@@ -76,7 +76,54 @@ WAIT_RETURN = NOT_REACHED
 EPDIS_RESULT = NOT_APPLICABLE
 ```
 
-for that branch. Missing EPDIS events are not treated as instrumentation failure. The load-bearing R1A discriminator there is completion lineage: whether the same request had a terminal completion-path event before U. Evidence from the EPDIS branch is not silently inherited into reset/disconnect.
+for that branch. Missing EPDIS events are not treated as instrumentation failure. Evidence from the EPDIS branch is not silently inherited into reset/disconnect.
+
+The reset branch also has an IRQ-ordering constraint: the top-level gadget IRQ handles `USBRST/RESETDET` and calls `dwc2_hsotg_disconnect()` before it later services `OEPINT/IEPINT` from the same IRQ snapshot. `kill_all_requests()` clears `ep->req` before completing the queued requests. Therefore the ordinary `XFERCOMPL_PATH` hook alone is structurally insufficient to guarantee preservation of a completion that becomes pending in the reset/kill window. A reset-safe witness must preserve the active request/map/program lineage before `disconnect()` retires it.
+
+#### Reset hardware contract `K_hw`
+
+Only an exact controller databook/revision matched to the running hardware identity (`GSNPSID` and any required integration revision) may carry the hardware-contract claim. Product pages, legacy Raspberry Pi source comments, and third-party implementations are at most `WEAK_SIGNAL` and are excluded from load-bearing report evidence.
+
+The hardware-contract result is frozen as exactly one of:
+
+```text
+explicit text: reset terminates/quiesces pending device DMA
+    -> K_hw = TERMINATES_PENDING_DMA
+    -> RESET BRANCH = DEAD for the relevant contract scope
+
+explicit text: reset does not terminate pending DMA,
+or software must explicitly NAK/disable/quiesce the endpoint
+    -> K_hw = ABSENT
+    -> real promotion: reset itself is not a quiescence guarantee
+
+no explicit text for the matched controller revision
+    -> K_hw = UNDETERMINED
+    -> no movement in the evidence ladder
+```
+
+Absence of documentation is never evidence that `K_hw` is absent.
+
+#### Reset-safe completion/progress witness
+
+When `K_hw = UNDETERMINED`, hardware observation is the planned fallback rather than an inference from missing documentation. The observer must record, for the active eligible OUT lineage, a `RESET_ENTRY` snapshot before request retirement and the existing `PRE_U` / `UNMAP_DONE` observations with:
+
+```text
+reset_generation
+request_generation
+mapping_generation
+program_generation
+epint_generation
+raw DOEPINT
+raw DOEPTSIZ
+```
+
+The measurement code remains read-only with respect to `DOEPINT` and must not reorder the reset/disconnect path.
+
+A fresh same-lineage `XferCompl` transition observed before U is terminal and yields `R1A_DEAD` for that attempt. For reset-safe register attribution, a transition is considered fresh only when the earlier snapshot had `XferCompl` clear, the later snapshot has it set, request/map/program generations are unchanged, and no endpoint-interrupt-handler entry or re-programming occurred between the two snapshots. A bit already high at the first reset snapshot is not silently treated as fresh; without an independently attributable completion-path event it is `AMBIGUOUS`.
+
+If `XferCompl` is clear at `PRE_U` and becomes set only at `UNMAP_DONE`, with the same lineage and no intervening endpoint handler/re-programming, the observer has proved **post-U controller completion progress for that programmed transfer**. This may support the reset-specific R1A predicate that software unmapped before the controller's terminal completion signal, but it does not by itself prove that an OUT memory write occurred after U. A `DOEPTSIZ` delta across `PRE_U -> UNMAP_DONE` is supporting context only and is never promoted alone to `D_issue` or `D_commit`.
+
+If no post-reset progress is observed, the result is `NOT_OBSERVED` for that configuration; it does not prove that reset globally quiesces DMA.
 
 ### R1A_PROVEN
 
@@ -109,7 +156,7 @@ This proves the narrower statement:
 
 It does **not**, by itself, prove literal hardware ownership at U, post-unmap DMA, or a memory-side effect.
 
-For the reset/disconnect PRIMARY-A branch, `R1A_PROVEN` uses a separate branch-specific predicate and does not require EPDIS observations that the source path never executes. That predicate must be frozen before runtime promotion; until then the branch may be `SUPPORTED` or `DEAD`, but not promoted by borrowing the endpoint-stop criterion.
+For the reset/disconnect PRIMARY-A branch, `R1A_PROVEN` uses a separate branch-specific predicate and does not require EPDIS observations that the source path never executes. A reset-specific promotion may come from an explicit matched-databook `K_hw = ABSENT` contract combined with the frozen software ordering, or from a positive same-lineage runtime observation that the controller's terminal completion signal occurs only after U. Until one of those predicates is satisfied under complete lineage controls, the branch may be `SUPPORTED`, `DEAD`, `AMBIGUOUS`, or `NOT_OBSERVED`, but it may not borrow the endpoint-stop criterion.
 
 ### R1A_SUPPORTED_ONLY
 
@@ -121,7 +168,8 @@ The following are supporting signals but are insufficient alone:
 - PRE/RESULT `XFRSIZ` delta.
 - a stop timeout without the full fresh-ack and lineage controls.
 - a `timeout_no_ack` observation whose `WAIT_RETURN -> PRE_U` interval is not proven clean of endpoint-interrupt-handler entries.
-- reset/disconnect retirement before a branch-specific R1A predicate has been frozen.
+- reset/disconnect retirement while `K_hw = UNDETERMINED` and no positive reset-safe runtime progress witness exists.
+- a `DOEPTSIZ` delta without a fresh terminal-status transition.
 
 ### R1A_DEAD
 
@@ -143,7 +191,7 @@ or
 EPDIS_RESULT == timeout_then_ack_before_U
 ```
 
-For the reset/disconnect PRIMARY-A branch, the available terminal kill is a same-lineage completion-path event before U unless and until another positive terminal artifact is source-justified and frozen for that branch.
+For the reset/disconnect PRIMARY-A branch, R1A is killed by either an exact matched-databook `K_hw = TERMINATES_PENDING_DMA` guarantee or a fresh same-lineage completion witness before U. A reset-safe `XferCompl` transition from clear to set before U is an acceptable positive terminal witness when its lineage and no-handler/no-reprogram controls are complete.
 
 A dead attempt is not eligible for R2/R3 promotion.
 
