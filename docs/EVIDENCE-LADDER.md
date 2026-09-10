@@ -17,7 +17,7 @@ endpoint
 
 `mapping_generation` is an explicit monotonically increasing counter assigned at every successful map. `dma_addr` is diagnostic only and is never mapping identity.
 
-`program_generation` is a distinct monotonically increasing counter assigned every time the active OUT request is programmed into the endpoint/DMA state for that lineage. Re-programming the same DMA mapping therefore cannot be hidden by address reuse or an unchanged map generation.
+`program_generation` is a distinct monotonically increasing counter assigned only when the active OUT request is handed to hardware by the `DOEPCTL.EPENA` programming write. The associated `DOEPDMA` write is recorded as data for that generation but does not increment the counter. Therefore `program_generation` increasing again for the same mapping generation means a true re-programming event rather than the two normal register writes of one programming operation.
 
 ### EPDISBLD witness discipline
 
@@ -36,6 +36,10 @@ program_generation
 
 Any observed or instrumented driver-side clear of `EPDISBLD` between PRE and RESULT invalidates fresh-edge attribution for that attempt and yields `R1A_AMBIGUOUS`, unless the clear is itself tied to a positive terminal outcome for the same lineage.
 
+The observer also maintains an endpoint-interrupt-entry generation for the affected endpoint. It increments at entry to `dwc2_hsotg_epint()` and is sampled at `WAIT_RETURN` and `PRE_U`. The interval is considered clean only when those generations are equal. If another endpoint-interrupt handler ran between those observations, `timeout_no_ack` remains a candidate only and the attempt is `R1A_AMBIGUOUS`; absence of a visible bit cannot then be promoted to proof.
+
+No measurement read may be inserted into the body of the driver's natural wait loop. The observer must not change the loop's polling cadence, timeout length, or iteration count.
+
 ### EPDIS_RESULT is four-state
 
 ```text
@@ -47,8 +51,8 @@ EPDIS_RESULT = fresh_ack
 
 - `fresh_ack`: `EPDISBLD` was known clear immediately before EPDIS and a fresh assertion is observed before the natural wait deadline and before U.
 - `timeout_then_ack_before_U`: the natural wait times out, but a fresh `EPDISBLD` assertion is observed after the timeout and before U.
-- `timeout_no_ack`: the natural wait times out and no fresh `EPDISBLD` assertion is observed before U.
-- `ambiguous`: stale-high PRE state, an intervening W1C clear, observation loss, lineage mismatch, or any condition that prevents proving whether an assertion is fresh.
+- `timeout_no_ack`: the natural wait times out, no fresh `EPDISBLD` assertion is observed before U, and the `WAIT_RETURN -> PRE_U` interval is proven free of endpoint-interrupt-handler entries for that endpoint.
+- `ambiguous`: stale-high PRE state, an intervening W1C clear, an endpoint-interrupt entry in the `WAIT_RETURN -> PRE_U` interval, observation loss, lineage mismatch, or any condition that prevents proving whether an assertion is fresh.
 
 `fresh_ack` and `timeout_then_ack_before_U` both kill R1A for that linked attempt. A timeout warning is therefore never sufficient evidence by itself.
 
@@ -62,9 +66,21 @@ A same-lineage completion-path event before U is a positive terminal artifact an
 
 `DOEPTSIZ.XFERSIZE` is sampled at PRE and RESULT. It is asynchronous to core activity, and a short OUT transfer can leave a positive value even when the transfer is effectively complete. Therefore a positive residual never proves ownership. Only the PRE/RESULT values and their delta are retained as supporting context.
 
+### PRIMARY-A reset/disconnect branch
+
+The reset/disconnect path is a distinct PRIMARY-A branch. In that path `dwc2_hsotg_disconnect()` can retire requests without first calling `dwc2_hsotg_ep_stop_xfr()`. Therefore:
+
+```text
+EPDIS_ASSERT = NOT_REACHED
+WAIT_RETURN = NOT_REACHED
+EPDIS_RESULT = NOT_APPLICABLE
+```
+
+for that branch. Missing EPDIS events are not treated as instrumentation failure. The load-bearing R1A discriminator there is completion lineage: whether the same request had a terminal completion-path event before U. Evidence from the EPDIS branch is not silently inherited into reset/disconnect.
+
 ### R1A_PROVEN
 
-For one linked PRIMARY-A attempt, all of the following are required:
+For one linked PRIMARY-A endpoint-stop attempt, all of the following are required:
 
 ```text
 same_epoch
@@ -77,6 +93,7 @@ host Bulk OUT still outstanding at trigger
 exact holder/wire validity gates pass
 EPDISBLD known clear immediately before EPDIS assertion
 EPDIS_RESULT == timeout_no_ack
+WAIT_RETURN epint_generation == PRE_U epint_generation
 no same-lineage completion-path witness before U
 UNMAP_BEGIN -> UNMAP_DONE for the same lineage
 no intervening map generation
@@ -92,6 +109,8 @@ This proves the narrower statement:
 
 It does **not**, by itself, prove literal hardware ownership at U, post-unmap DMA, or a memory-side effect.
 
+For the reset/disconnect PRIMARY-A branch, `R1A_PROVEN` uses a separate branch-specific predicate and does not require EPDIS observations that the source path never executes. That predicate must be frozen before runtime promotion; until then the branch may be `SUPPORTED` or `DEAD`, but not promoted by borrowing the endpoint-stop criterion.
+
 ### R1A_SUPPORTED_ONLY
 
 The following are supporting signals but are insufficient alone:
@@ -101,10 +120,12 @@ The following are supporting signals but are insufficient alone:
 - positive residual `DOEPTSIZ.XFRSIZ`.
 - PRE/RESULT `XFRSIZ` delta.
 - a stop timeout without the full fresh-ack and lineage controls.
+- a `timeout_no_ack` observation whose `WAIT_RETURN -> PRE_U` interval is not proven clean of endpoint-interrupt-handler entries.
+- reset/disconnect retirement before a branch-specific R1A predicate has been frozen.
 
 ### R1A_DEAD
 
-For a linked attempt, R1A is killed by a positive terminal observation before U, including either:
+For a linked endpoint-stop attempt, R1A is killed by a positive terminal observation before U, including either:
 
 ```text
 same-lineage completion-path event before U
@@ -122,9 +143,11 @@ or
 EPDIS_RESULT == timeout_then_ack_before_U
 ```
 
+For the reset/disconnect PRIMARY-A branch, the available terminal kill is a same-lineage completion-path event before U unless and until another positive terminal artifact is source-justified and frozen for that branch.
+
 A dead attempt is not eligible for R2/R3 promotion.
 
-Missing data, stale PRE-set acknowledgement bits, an intervening W1C clear, event loss, identity mismatch, re-programming, or ambiguous ordering produce `R1A_AMBIGUOUS`, not `R1A_PROVEN` and not `R1A_DEAD`.
+Missing data, stale PRE-set acknowledgement bits, an intervening W1C clear, endpoint-interrupt activity in an unguarded attribution interval, event loss, identity mismatch, re-programming, or ambiguous ordering produce `R1A_AMBIGUOUS`, not `R1A_PROVEN` and not `R1A_DEAD`.
 
 ## R2 — DMA lifetime violation / `D_issue`
 
