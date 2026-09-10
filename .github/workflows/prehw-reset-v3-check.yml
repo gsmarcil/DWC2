@@ -71,6 +71,9 @@ jobs:
       - name: Add reset-safe v3 witness
         run: python3 .github/scripts/prehw_reset_v3.py
 
+      - name: Fix disabled-build abstraction
+        run: python3 .github/scripts/prehw_reset_v3_fix.py
+
       - name: Semantic fail-closed checks
         run: |
           set -euxo pipefail
@@ -92,23 +95,20 @@ jobs:
           test "$(grep -n 'r1_program_id++' drivers/usb/dwc2/gadget.c | wc -l)" -eq 1
           test "$(grep -n 'r1_reset_id = reset_id' drivers/usb/dwc2/gadget.c | wc -l)" -eq 1
           test "$(grep -n 'DWC2_R1_RESET_ENTRY' drivers/usb/dwc2/gadget.c | wc -l)" -ge 2
+          test "$(grep -n 'dwc2_r1_measure_reset_active' drivers/usb/dwc2/gadget.c | wc -l)" -ge 3
           test -z "$(git diff -- drivers/usb/dwc2/core.c)"
           ! grep -n 'dwc2_r1_' drivers/usb/dwc2/core.c
 
           python3 - <<'PY'
           from pathlib import Path
           s = Path('drivers/usb/dwc2/gadget.c').read_text()
-          # reset lineage must be captured before disconnect retires ep->req
           a = s.index('dwc2_r1_measure_reset_entry(hsotg, gintsts);')
           b = s.index('dwc2_hsotg_disconnect(hsotg);', a)
           assert a < b
-          # UNMAP_DONE snapshot must remain after the real unmap call
           u = s.index('dwc2_hsotg_unmap_dma(hsotg, hs_ep, hs_req);')
           d = s.index('DWC2_R1_UNMAP_DONE', u)
           assert u < d
-          # no instrumentation inside the natural polling helper
           assert 'dwc2_r1_' not in Path('drivers/usb/dwc2/core.c').read_text()
-          # reset-safe observer has one reset-entry hook and leaves IRQ ordering intact
           assert s.count('dwc2_r1_measure_reset_entry(hsotg, gintsts);') == 1
           PY
 
@@ -141,8 +141,6 @@ jobs:
         run: |
           set -euxo pipefail
           cd linux
-          # v1 created trace-r1.h as an untracked file. Intent-to-add is required
-          # so the final evidence patch contains that new file and is standalone.
           git add -N drivers/usb/dwc2/trace-r1.h
           git diff --binary > ../R1A-RESET-INSTRUMENTATION-v3.patch
           test -s ../R1A-RESET-INSTRUMENTATION-v3.patch
