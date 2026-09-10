@@ -1,6 +1,6 @@
 # DWC2 R1 — DMA lifetime research
 
-> **Private / embargoed workspace.** This repository is the canonical working record for the DWC2 research campaign. It is intentionally private until the research, coordinated disclosure, and any required publication approval are complete. See [`SECURITY.md`](SECURITY.md).
+> **Embargoed working repository.** The repository may be temporarily visible during active collaborative work, but research artifacts are intended to return to private handling before runtime evidence or coordinated disclosure material is added. See [`SECURITY.md`](SECURITY.md).
 
 Research repository for the Linux DWC2 gadget request-unmap lifetime hypothesis and the separate DWC2 PIO RX boundary track.
 
@@ -18,7 +18,7 @@ Research repository for the Linux DWC2 gadget request-unmap lifetime hypothesis 
 | Source path: stop-timeout may continue into teardown | **SOURCE-PROVEN** |
 | Source path: request DMA mapping is unmapped before giveback | **SOURCE-PROVEN** |
 | Checked-in pre-runtime baseline | **VERIFIED — canonical v4.2 import** |
-| Holder event producer compatible with active `holder_merger` | **BLOCKED — imported source is incompatible** |
+| Holder event producer compatible with active `holder_merger` | **PASS — G1 CLOSED PRE-RUNTIME** |
 | R1A trigger/reachability on real DWC2 hardware | **NOT EXECUTED** |
 | Real `UNMAP_DONE` for the timed-out request | **NOT PROVEN** |
 | Post-unmap DMA attempt (`D_issue`) | **UNKNOWN** |
@@ -27,20 +27,26 @@ Research repository for the Linux DWC2 gadget request-unmap lifetime hypothesis 
 
 **No memory-corruption claim is made in this repository.**
 
-The `baseline/` directory is a byte-identical import of the independently
-authenticated v4.2 archive. Its 89 pinned paths and executable pre-runtime gates
-are reproducible from this tree. Repository and campaign readiness are gated by:
+The `baseline/` directory remains the byte-identical canonical v4.2 import. The
+G1 holder-producer work is next-campaign tooling around that baseline; it does
+not rewrite authenticated baseline bytes. Repository and campaign readiness are
+gated by:
 
 ```sh
 ./VERIFY-REPOSITORY.sh
 ```
 
-The baseline-integrity portion reports `REPOSITORY_BASELINE: PASS`. The overall
-gate intentionally exits nonzero because the currently preserved device source
-cannot produce the JSONL contract consumed by the active `holder_merger`. See
-[`docs/HOLDER-PRODUCER-CONTRACT.md`](docs/HOLDER-PRODUCER-CONTRACT.md). This does
-not invalidate the imported v4.2 bytes, and it does not change the R1A/R2/R3
-runtime states below.
+The verified pre-hardware result is:
+
+```text
+REPOSITORY_BASELINE: PASS
+HOLDER_CAMPAIGN_READINESS: PASS
+REPOSITORY_GATE: PASS
+```
+
+The holder closure also includes discriminating contract controls, a fixture-log
+guard, and an 18/18 real producer-to-frozen-merger round trip. These are
+pre-runtime proofs only; none promotes R1A/R2/R3.
 
 ## Evidence ladder
 
@@ -59,7 +65,7 @@ Each transition requires its own artifact. A later claim is never inferred from 
 ## Repository map
 
 - [`r1a-host/`](r1a-host/) — canonical location for the host-side harness source in the next complete epoch.
-- [`r1a-device/`](r1a-device/) — canonical location for the preserved legacy FunctionFS source; the compatible holder-event producer is still missing.
+- [`r1a-device/`](r1a-device/) — canonical holder-witness producer plus the hash-pinned pre-holder negative control.
 - [`docs/HISTORY.md`](docs/HISTORY.md) — research history, keeping only conclusions that survived later audits.
 - [`docs/CONFIRMED.md`](docs/CONFIRMED.md) — facts currently accepted.
 - [`docs/PIO-RX-TRACK.md`](docs/PIO-RX-TRACK.md) — separate source-proven PIO RX boundary finding.
@@ -73,6 +79,7 @@ Each transition requires its own artifact. A later claim is never inferred from 
 - [`docs/hardware/TINKER-BOARD-S-PROFILE.md`](docs/hardware/TINKER-BOARD-S-PROFILE.md) — Tinker Board S/RK3288 specification/profile and revision boundary.
 - [`docs/hardware/TINKER-BOARD-S-COMMANDS.md`](docs/hardware/TINKER-BOARD-S-COMMANDS.md) — deferred RK3288/Tinker command runbook, to be used only if `AQ-D1` authorizes the board.
 - [`docs/hardware/images/`](docs/hardware/images/) — repository-local hardware identification visuals; exact acquired-unit photographs are added with runtime evidence.
+- [`docs/HOLDER-PRODUCER-CONTRACT.md`](docs/HOLDER-PRODUCER-CONTRACT.md) — executable G1 producer/consumer closure and evidence ceiling.
 - [`docs/PENDING.md`](docs/PENDING.md) — open claims and blockers.
 - [`docs/EVIDENCE-LADDER.md`](docs/EVIDENCE-LADDER.md) — proof contracts for R1A/R2/R3/Impact.
 - [`docs/RUNTIME-RUNBOOK.md`](docs/RUNTIME-RUNBOOK.md) — next hardware campaign.
@@ -85,7 +92,7 @@ Each transition requires its own artifact. A later claim is never inferred from 
 
 GitHub `main` is the canonical research record. New experiments, tooling changes, and evidence should be committed here with explicit epoch/provenance impact. Local copies are working copies only until their exact bytes/hashes are recorded in this repository.
 
-Do not repair a missing canonical epoch source by recreating it from documentation or memory. Import the original verified artifact, then verify it byte-for-byte.
+Do not repair a missing canonical epoch source by recreating it from documentation or memory. Import an original verified artifact when provenance requires restoration; new instrumentation must be identified as new measurement tooling rather than disguised as restored evidence.
 
 ## Reporting discipline
 
