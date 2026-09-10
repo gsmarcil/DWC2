@@ -1,0 +1,403 @@
+name: PREHW instrumentation v2 check
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  patch-and-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc
+
+      - name: Fetch pinned Linux tree
+        run: |
+          set -euxo pipefail
+          git init linux
+          cd linux
+          git remote add origin https://github.com/torvalds/linux.git
+          git fetch --depth=1 origin f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+
+      - name: Apply last build-green v1 measurement patch
+        run: |
+          set -euxo pipefail
+          curl -L --fail --silent --show-error \
+            https://raw.githubusercontent.com/gsmarcil/DWC2/ccf49e5c0cf20f17bcc96465b2a3e37392cf49cb/instr/0001-dwc2-r1-linear-lifetime-tracepoints.patch \
+            -o v1.patch
+          cd linux
+          git apply --check ../v1.patch
+          git apply ../v1.patch
+
+      - name: Upgrade observer to v2 discriminators
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('linux/drivers/usb/dwc2')
+          coreh = root / 'core.h'
+          gadget = root / 'gadget.c'
+          trace = root / 'trace-r1.h'
+
+          def once(text, old, new, label):
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f'{label}: expected 1 match, got {n}')
+              return text.replace(old, new, 1)
+
+          # request lineage: map generation remains separate; program generation
+          # advances only at the EPENA handoff.
+          s = coreh.read_text()
+          s = once(s,
+          '''\tu64 r1_req_id;\n\tu64 r1_map_id;\n\tdma_addr_t r1_dma;\n\tu32 r1_length;\n\tbool r1_linear;''',
+          '''\tu64 r1_req_id;\n\tu64 r1_map_id;\n\tu64 r1_program_id;\n\tdma_addr_t r1_dma;\n\tu32 r1_length;\n\tbool r1_linear;''',
+          'core.h request lineage')
+          s = once(s,
+          '''\tstruct dwc2_hsotg_req    *req;\n\tstruct dentry           *debugfs;\n\n\tunsigned long           total_data;''',
+          '''\tstruct dwc2_hsotg_req    *req;\n\tstruct dentry           *debugfs;\n#ifdef CONFIG_USB_DWC2_R1_MEASURE\n\tu64                     r1_epint_seq;\n#endif\n\n\tunsigned long           total_data;''',
+          'core.h epint generation')
+          coreh.write_text(s)
+
+          s = gadget.read_text()
+          s = once(s,
+          '''enum dwc2_r1_lifetime_stage {\n\tDWC2_R1_MAP = 1,\n\tDWC2_R1_PROGRAMMED = 2,\n\tDWC2_R1_UNMAP_BEGIN = 3,\n\tDWC2_R1_UNMAP_DONE = 4,\n};''',
+          '''enum dwc2_r1_lifetime_stage {\n\tDWC2_R1_MAP = 1,\n\tDWC2_R1_PROGRAMMED = 2,\n\tDWC2_R1_XFERCOMPL_PATH = 3,\n\tDWC2_R1_EPDIS_ASSERT = 4,\n\tDWC2_R1_WAIT_RETURN = 5,\n\tDWC2_R1_PRE_U = 6,\n\tDWC2_R1_UNMAP_BEGIN = 7,\n\tDWC2_R1_UNMAP_DONE = 8,\n};''',
+          'stage enum')
+
+          # Replace the helper block wholesale. No DOEPINT write is introduced.
+          start = s.index('static void dwc2_r1_measure_reset(struct dwc2_hsotg_req *hs_req)')
+          end = s.index('/**\n * dwc2_gadget_incr_frame_num', start)
+          helper = r'''static void dwc2_r1_measure_reset(struct dwc2_hsotg_req *hs_req)
+{
+	hs_req->r1_req_id = 0;
+	hs_req->r1_map_id = 0;
+	hs_req->r1_program_id = 0;
+	hs_req->r1_dma = 0;
+	hs_req->r1_length = 0;
+	hs_req->r1_linear = false;
+}
+
+static bool dwc2_r1_measure_eligible(struct dwc2_hsotg *hsotg,
+				     struct dwc2_hsotg_ep *hs_ep,
+				     struct dwc2_hsotg_req *hs_req)
+{
+	struct usb_request *req = &hs_req->req;
+
+	return using_dma(hsotg) && !using_desc_dma(hsotg) && hs_ep->index &&
+	       !hs_ep->dir_in && hs_ep->ep.desc &&
+	       usb_endpoint_xfer_bulk(hs_ep->ep.desc) && req->length &&
+	       !req->sg_was_mapped && !req->num_sgs && req->dma_mapped &&
+	       !hs_req->saved_req_buf;
+}
+
+static void dwc2_r1_emit(struct dwc2_hsotg *hsotg,
+			 struct dwc2_hsotg_ep *hs_ep,
+			 struct dwc2_hsotg_req *hs_req,
+			 u8 stage, int result, bool snapshot_regs,
+			 dma_addr_t program_dma, u8 flags)
+{
+	u32 epctl = 0, epint = 0, epsiz = 0;
+	u64 epint_seq = 0;
+
+	if (!hs_req || !hs_req->r1_linear)
+		return;
+
+	if (snapshot_regs && !hs_ep->dir_in) {
+		epctl = dwc2_readl(hsotg, DOEPCTL(hs_ep->index));
+		epint = dwc2_readl(hsotg, DOEPINT(hs_ep->index));
+		epsiz = dwc2_readl(hsotg, DOEPTSIZ(hs_ep->index));
+		epint_seq = hs_ep->r1_epint_seq;
+	}
+
+	trace_dwc2_r1_lifetime(stage, hs_req->r1_req_id,
+			       hs_req->r1_map_id, hs_req->r1_program_id,
+			       hs_ep->index, hs_req->r1_dma, program_dma,
+			       hs_req->r1_length, hs_req->req.actual,
+			       result, hs_req->req.status,
+			       hs_req->req.dma_mapped, epctl, epint, epsiz,
+			       epint_seq, flags);
+}
+
+static void dwc2_r1_measure_mapped(struct dwc2_hsotg *hsotg,
+				   struct dwc2_hsotg_ep *hs_ep,
+				   struct dwc2_hsotg_req *hs_req)
+{
+	if (!dwc2_r1_measure_eligible(hsotg, hs_ep, hs_req))
+		return;
+
+	hs_req->r1_req_id = atomic64_inc_return(&dwc2_r1_req_seq);
+	hs_req->r1_map_id = atomic64_inc_return(&dwc2_r1_map_seq);
+	hs_req->r1_program_id = 0;
+	hs_req->r1_dma = hs_req->req.dma;
+	hs_req->r1_length = hs_req->req.length;
+	hs_req->r1_linear = true;
+	dwc2_r1_emit(hsotg, hs_ep, hs_req, DWC2_R1_MAP, 0, false, 0, 0);
+}
+
+static void dwc2_r1_measure_programmed(struct dwc2_hsotg *hsotg,
+				       struct dwc2_hsotg_ep *hs_ep,
+				       struct dwc2_hsotg_req *hs_req,
+				       bool dma_written)
+{
+	dma_addr_t program_dma = 0;
+
+	if (!hs_req || !hs_req->r1_linear || hs_ep->dir_in)
+		return;
+
+	hs_req->r1_program_id++;
+	if (dma_written)
+		program_dma = hs_req->req.dma;
+	dwc2_r1_emit(hsotg, hs_ep, hs_req, DWC2_R1_PROGRAMMED, 0,
+		     false, program_dma, dma_written ? 1 : 0);
+}
+
+static void dwc2_r1_measure_event(struct dwc2_hsotg *hsotg,
+				  struct dwc2_hsotg_ep *hs_ep,
+				  struct dwc2_hsotg_req *hs_req,
+				  u8 stage, int result, bool snapshot_regs)
+{
+	dwc2_r1_emit(hsotg, hs_ep, hs_req, stage, result,
+		     snapshot_regs, 0, 0);
+}
+
+static void dwc2_r1_measure_epint_enter(struct dwc2_hsotg_ep *hs_ep)
+{
+	if (hs_ep && !hs_ep->dir_in)
+		hs_ep->r1_epint_seq++;
+}
+#else
+static inline void dwc2_r1_measure_reset(struct dwc2_hsotg_req *hs_req) { }
+static inline void dwc2_r1_measure_mapped(struct dwc2_hsotg *hsotg,
+					  struct dwc2_hsotg_ep *hs_ep,
+					  struct dwc2_hsotg_req *hs_req) { }
+static inline void dwc2_r1_measure_programmed(struct dwc2_hsotg *hsotg,
+					      struct dwc2_hsotg_ep *hs_ep,
+					      struct dwc2_hsotg_req *hs_req,
+					      bool dma_written) { }
+static inline void dwc2_r1_measure_event(struct dwc2_hsotg *hsotg,
+					 struct dwc2_hsotg_ep *hs_ep,
+					 struct dwc2_hsotg_req *hs_req,
+					 u8 stage, int result,
+					 bool snapshot_regs) { }
+static inline void dwc2_r1_measure_epint_enter(struct dwc2_hsotg_ep *hs_ep) { }
+#endif
+
+'''
+          s = s[:start] + helper + s[end:]
+
+          # Remove the old PROGRAMMED event from the DOEPDMA write; program
+          # generation advances only at the later EPENA handoff.
+          s = once(s,
+          '''\n\t\t\tdwc2_r1_measure_event(hs_ep, hs_req,\n\t\t\t\t\t       DWC2_R1_PROGRAMMED, 0);\n''',
+          '\n', 'old programmed event')
+
+          # Emit PROGRAMMED after the existing EPENA control write.
+          s = once(s,
+          '''\tdev_dbg(hsotg->dev, "%s: DxEPCTL=0x%08x\\n", __func__, ctrl);\n\tdwc2_writel(hsotg, ctrl, epctrl_reg);\n\n\t/*\n\t * set these, it seems that DMA support increments past the end''',
+          '''\tdev_dbg(hsotg->dev, "%s: DxEPCTL=0x%08x\\n", __func__, ctrl);\n\tdwc2_writel(hsotg, ctrl, epctrl_reg);\n\tdwc2_r1_measure_programmed(hsotg, hs_ep, hs_req,\n\t\t\t\t   using_dma(hsotg) && !continuing && length != 0);\n\n\t/*\n\t * set these, it seems that DMA support increments past the end''',
+          'EPENA handoff')
+
+          # Endpoint-interrupt entry generation and positive completion-path
+          # witness. The hardware status was already captured into ints by the
+          # driver; measurement never infers completion from a late register read.
+          s = once(s,
+          '''\tu32 ints;\n\n\tints = dwc2_gadget_read_ep_interrupts(hsotg, idx, dir_in);''',
+          '''\tu32 ints;\n\n\tdwc2_r1_measure_epint_enter(hs_ep);\n\tints = dwc2_gadget_read_ep_interrupts(hsotg, idx, dir_in);''',
+          'epint entry sequence')
+          s = once(s,
+          '''\tif (ints & DXEPINT_XFERCOMPL) {\n\t\tdev_dbg(hsotg->dev,''',
+          '''\tif (ints & DXEPINT_XFERCOMPL) {\n\t\tdwc2_r1_measure_event(hsotg, hs_ep, hs_ep->req,\n\t\t\t\t       DWC2_R1_XFERCOMPL_PATH, 0, false);\n\t\tdev_dbg(hsotg->dev,''',
+          'completion path witness')
+
+          # The wait itself remains the original helper call with original timeout.
+          # Measurements occur only immediately before EPDIS and after return.
+          s = once(s,
+          '''static void dwc2_hsotg_ep_stop_xfr(struct dwc2_hsotg *hsotg,\n\t\t\t\t   struct dwc2_hsotg_ep *hs_ep)\n{\n\tu32 epctrl_reg;\n\tu32 epint_reg;''',
+          '''static void dwc2_hsotg_ep_stop_xfr(struct dwc2_hsotg *hsotg,\n\t\t\t\t   struct dwc2_hsotg_ep *hs_ep)\n{\n\tu32 epctrl_reg;\n\tu32 epint_reg;\n\tint epdis_wait;''',
+          'epdis wait local')
+          s = once(s,
+          '''\t/* Disable ep */\n\tdwc2_set_bit(hsotg, epctrl_reg, DXEPCTL_EPDIS | DXEPCTL_SNAK);\n\n\t/* Wait for ep to be disabled */\n\tif (dwc2_hsotg_wait_bit_set(hsotg, epint_reg, DXEPINT_EPDISBLD, 100))\n\t\tdev_warn(hsotg->dev,\n\t\t\t "%s: timeout DOEPCTL.EPDisable\\n", __func__);''',
+          '''\t/* Disable ep */\n\tdwc2_r1_measure_event(hsotg, hs_ep, hs_ep->req,\n\t\t\t       DWC2_R1_EPDIS_ASSERT, 0, true);\n\tdwc2_set_bit(hsotg, epctrl_reg, DXEPCTL_EPDIS | DXEPCTL_SNAK);\n\n\t/* Wait for ep to be disabled. Keep the natural polling loop untouched. */\n\tepdis_wait = dwc2_hsotg_wait_bit_set(hsotg, epint_reg,\n\t\t\t\t\t     DXEPINT_EPDISBLD, 100);\n\tdwc2_r1_measure_event(hsotg, hs_ep, hs_ep->req,\n\t\t\t       DWC2_R1_WAIT_RETURN, epdis_wait, true);\n\tif (epdis_wait)\n\t\tdev_warn(hsotg->dev,\n\t\t\t "%s: timeout DOEPCTL.EPDisable\\n", __func__);''',
+          'EPDIS assert/wait-return')
+
+          # PRE_U is the last read-only snapshot before the existing unmap.
+          s = once(s,
+          '''\tif (using_dma(hsotg)) {\n\t\tdwc2_r1_measure_event(hs_ep, hs_req,\n\t\t\t\t       DWC2_R1_UNMAP_BEGIN, result);\n\t\tdwc2_hsotg_unmap_dma(hsotg, hs_ep, hs_req);\n\t\tdwc2_r1_measure_event(hs_ep, hs_req,\n\t\t\t\t       DWC2_R1_UNMAP_DONE, result);\n\t}''',
+          '''\tif (using_dma(hsotg)) {\n\t\tdwc2_r1_measure_event(hsotg, hs_ep, hs_req,\n\t\t\t\t       DWC2_R1_PRE_U, 0, true);\n\t\tdwc2_r1_measure_event(hsotg, hs_ep, hs_req,\n\t\t\t\t       DWC2_R1_UNMAP_BEGIN, result, false);\n\t\tdwc2_hsotg_unmap_dma(hsotg, hs_ep, hs_req);\n\t\tdwc2_r1_measure_event(hsotg, hs_ep, hs_req,\n\t\t\t\t       DWC2_R1_UNMAP_DONE, result, false);\n\t}''',
+          'PRE_U/unmap lineage')
+          gadget.write_text(s)
+
+          trace.write_text(r'''/* SPDX-License-Identifier: GPL-2.0 */
+#undef TRACE_SYSTEM
+#define TRACE_SYSTEM dwc2_r1
+
+#if !defined(_TRACE_DWC2_R1_H) || defined(TRACE_HEADER_MULTI_READ)
+#define _TRACE_DWC2_R1_H
+
+#include <linux/tracepoint.h>
+
+TRACE_EVENT(dwc2_r1_lifetime,
+	TP_PROTO(u8 stage, u64 req_id, u64 map_id, u64 program_id,
+		 u8 ep_index, u64 dma_addr, u64 program_dma, u32 length,
+		 u32 actual, int result, int status, bool dma_mapped,
+		 u32 epctl, u32 epint, u32 epsiz, u64 epint_seq, u8 flags),
+
+	TP_ARGS(stage, req_id, map_id, program_id, ep_index, dma_addr,
+		program_dma, length, actual, result, status, dma_mapped,
+		epctl, epint, epsiz, epint_seq, flags),
+
+	TP_STRUCT__entry(
+		__field(u8, stage)
+		__field(u64, req_id)
+		__field(u64, map_id)
+		__field(u64, program_id)
+		__field(u8, ep_index)
+		__field(u64, dma_addr)
+		__field(u64, program_dma)
+		__field(u32, length)
+		__field(u32, actual)
+		__field(int, result)
+		__field(int, status)
+		__field(bool, dma_mapped)
+		__field(u32, epctl)
+		__field(u32, epint)
+		__field(u32, epsiz)
+		__field(u64, epint_seq)
+		__field(u8, flags)
+	),
+
+	TP_fast_assign(
+		__entry->stage = stage;
+		__entry->req_id = req_id;
+		__entry->map_id = map_id;
+		__entry->program_id = program_id;
+		__entry->ep_index = ep_index;
+		__entry->dma_addr = dma_addr;
+		__entry->program_dma = program_dma;
+		__entry->length = length;
+		__entry->actual = actual;
+		__entry->result = result;
+		__entry->status = status;
+		__entry->dma_mapped = dma_mapped;
+		__entry->epctl = epctl;
+		__entry->epint = epint;
+		__entry->epsiz = epsiz;
+		__entry->epint_seq = epint_seq;
+		__entry->flags = flags;
+	),
+
+	TP_printk("stage=%u req=%llu map=%llu program=%llu ep=%u dma=0x%llx program_dma=0x%llx len=%u actual=%u result=%d status=%d dma_mapped=%u epctl=0x%08x epint=0x%08x epsiz=0x%08x epint_seq=%llu flags=0x%x",
+		  __entry->stage,
+		  (unsigned long long)__entry->req_id,
+		  (unsigned long long)__entry->map_id,
+		  (unsigned long long)__entry->program_id,
+		  __entry->ep_index,
+		  (unsigned long long)__entry->dma_addr,
+		  (unsigned long long)__entry->program_dma,
+		  __entry->length, __entry->actual, __entry->result,
+		  __entry->status, __entry->dma_mapped, __entry->epctl,
+		  __entry->epint, __entry->epsiz,
+		  (unsigned long long)__entry->epint_seq, __entry->flags)
+);
+
+#endif /* _TRACE_DWC2_R1_H */
+
+#undef TRACE_INCLUDE_PATH
+#define TRACE_INCLUDE_PATH ../../drivers/usb/dwc2
+#undef TRACE_INCLUDE_FILE
+#define TRACE_INCLUDE_FILE trace-r1
+
+#include <trace/define_trace.h>
+''')
+          PY
+
+      - name: Semantic fail-closed checks
+        run: |
+          set -euxo pipefail
+          cd linux
+          git diff --check
+
+          # 1. Measurement must add no DOEPINT write.
+          if git diff -U0 | grep '^+' | grep -E 'dwc2_(write|set_bit).*DOEPINT'; then
+            echo 'FAIL: instrumentation adds a DOEPINT write'
+            exit 1
+          fi
+
+          # 2/3. No extra mapping or unmapping call sites.
+          test "$(git diff -U0 | grep '^+' | grep -c 'dwc2_hsotg_map_dma(' || true)" -eq 0
+          test "$(git diff -U0 | grep '^+' | grep -c 'dwc2_hsotg_unmap_dma(' || true)" -eq 0
+
+          # 4. Program generation increments in exactly one place: EPENA handoff helper.
+          test "$(grep -n 'r1_program_id++' drivers/usb/dwc2/gadget.c | wc -l)" -eq 1
+          grep -n 'dwc2_r1_measure_programmed' drivers/usb/dwc2/gadget.c
+
+          # 5. Instrumentation language remains measurement-only.
+          grep -n 'does not assert a post-unmap DMA' drivers/usb/dwc2/Kconfig
+
+          # 6. Natural polling implementation is untouched; no measurement code in core.c.
+          test -z "$(git diff -- drivers/usb/dwc2/core.c)"
+          test "$(grep -c 'dwc2_hsotg_wait_bit_set(hsotg, epint_reg' drivers/usb/dwc2/gadget.c)" -ge 1
+          ! grep -n 'dwc2_r1_' drivers/usb/dwc2/core.c
+
+          # Positive structural requirements.
+          grep -n 'DWC2_R1_EPDIS_ASSERT' drivers/usb/dwc2/gadget.c
+          grep -n 'DWC2_R1_WAIT_RETURN' drivers/usb/dwc2/gadget.c
+          grep -n 'DWC2_R1_PRE_U' drivers/usb/dwc2/gadget.c
+          grep -n 'DWC2_R1_XFERCOMPL_PATH' drivers/usb/dwc2/gadget.c
+          grep -n 'r1_epint_seq++' drivers/usb/dwc2/gadget.c
+
+      - name: Build with measurement disabled
+        run: |
+          set -euxo pipefail
+          cd linux
+          make defconfig
+          scripts/config --enable USB
+          scripts/config --enable USB_GADGET
+          scripts/config --enable USB_DWC2
+          scripts/config --enable USB_DWC2_DUAL_ROLE
+          scripts/config --enable TRACING
+          scripts/config --disable USB_DWC2_R1_MEASURE
+          make olddefconfig
+          grep '^# CONFIG_USB_DWC2_R1_MEASURE is not set' .config
+          make -j2 drivers/usb/dwc2/
+
+      - name: Build with measurement enabled
+        run: |
+          set -euxo pipefail
+          cd linux
+          make clean
+          scripts/config --enable USB_DWC2_R1_MEASURE
+          make olddefconfig
+          grep '^CONFIG_USB_DWC2_R1_MEASURE=y' .config
+          make -j2 drivers/usb/dwc2/
+
+      - name: Package validated candidate
+        if: always()
+        run: |
+          set -euxo pipefail
+          cd linux
+          git diff > ../R1A-INSTRUMENTATION-v2.patch
+          {
+            echo "kernel_pin=f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8"
+            echo "base_measurement_commit=ccf49e5c0cf20f17bcc96465b2a3e37392cf49cb"
+            echo "workflow_commit=${GITHUB_SHA}"
+            sha256sum ../R1A-INSTRUMENTATION-v2.patch
+          } > ../R1A-INSTRUMENTATION-v2.RECEIPT.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r1a-instrumentation-v2
+          path: |
+            R1A-INSTRUMENTATION-v2.patch
+            R1A-INSTRUMENTATION-v2.RECEIPT.txt
