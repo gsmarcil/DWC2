@@ -1,0 +1,449 @@
+diff --git a/drivers/usb/dwc2/Kconfig b/drivers/usb/dwc2/Kconfig
+index d7af55a8e..53e017670 100644
+--- a/drivers/usb/dwc2/Kconfig
++++ b/drivers/usb/dwc2/Kconfig
+@@ -84,6 +84,18 @@ config USB_DWC2_TRACK_MISSED_SOFS
+ 	  WARNING: This feature is still experimental.
+ 	  If in doubt, say N.
+ 
++config USB_DWC2_R1_MEASURE
++	bool "Enable DWC2 R1 DMA lifetime tracepoints"
++	depends on TRACING
++	default n
++	help
++	  Enable measurement-only tracepoints for the DWC2 R1 DMA lifetime
++	  experiment. The first campaign admits only non-EP0 Bulk OUT requests
++	  using address/buffer DMA, a core-owned linear mapping, and no DWC2
++	  alignment bounce. It records mapping/programming/unmap ordering and
++	  stable request/map generations; it does not assert a post-unmap DMA
++	  issue or memory effect. Say N for normal kernels.
++
+ config USB_DWC2_DEBUG_PERIODIC
+ 	bool "Enable Debugging Messages For Periodic Transfers"
+ 	depends on USB_DWC2_DEBUG || USB_DWC2_VERBOSE
+diff --git a/drivers/usb/dwc2/core.h b/drivers/usb/dwc2/core.h
+index 767251aa1..819abe0a4 100644
+--- a/drivers/usb/dwc2/core.h
++++ b/drivers/usb/dwc2/core.h
+@@ -126,6 +126,9 @@ struct dwc2_hsotg_ep {
+ 	struct dwc2_hsotg       *parent;
+ 	struct dwc2_hsotg_req    *req;
+ 	struct dentry           *debugfs;
++#ifdef CONFIG_USB_DWC2_R1_MEASURE
++	u64                     r1_epint_seq;
++#endif
+ 
+ 	unsigned long           total_data;
+ 	unsigned int            size_loaded;
+@@ -169,6 +172,15 @@ struct dwc2_hsotg_req {
+ 	struct usb_request      req;
+ 	struct list_head        queue;
+ 	void *saved_req_buf;
++#ifdef CONFIG_USB_DWC2_R1_MEASURE
++	u64 r1_req_id;
++	u64 r1_map_id;
++	u64 r1_program_id;
++	u64 r1_reset_id;
++	dma_addr_t r1_dma;
++	u32 r1_length;
++	bool r1_linear;
++#endif
+ };
+ 
+ #if IS_ENABLED(CONFIG_USB_DWC2_PERIPHERAL) || \
+diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
+index c8b02c27d..970855a4e 100644
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -23,6 +23,12 @@
+ #include <linux/io.h>
+ #include <linux/slab.h>
+ 
++#ifdef CONFIG_USB_DWC2_R1_MEASURE
++#include <linux/atomic.h>
++#define CREATE_TRACE_POINTS
++#include "trace-r1.h"
++#endif
++
+ #include <linux/usb/ch9.h>
+ #include <linux/usb/gadget.h>
+ #include <linux/usb/phy.h>
+@@ -105,6 +111,182 @@ static inline bool using_desc_dma(struct dwc2_hsotg *hsotg)
+ 	return hsotg->params.g_dma_desc;
+ }
+ 
++enum dwc2_r1_lifetime_stage {
++	DWC2_R1_MAP = 1,
++	DWC2_R1_PROGRAMMED = 2,
++	DWC2_R1_XFERCOMPL_PATH = 3,
++	DWC2_R1_EPDIS_ASSERT = 4,
++	DWC2_R1_WAIT_RETURN = 5,
++	DWC2_R1_PRE_U = 6,
++	DWC2_R1_UNMAP_BEGIN = 7,
++	DWC2_R1_UNMAP_DONE = 8,
++	DWC2_R1_RESET_ENTRY = 9,
++};
++
++#ifdef CONFIG_USB_DWC2_R1_MEASURE
++static atomic64_t dwc2_r1_req_seq = ATOMIC64_INIT(0);
++static atomic64_t dwc2_r1_map_seq = ATOMIC64_INIT(0);
++static atomic64_t dwc2_r1_reset_seq = ATOMIC64_INIT(0);
++
++static void dwc2_r1_measure_reset(struct dwc2_hsotg_req *hs_req)
++{
++	hs_req->r1_req_id = 0;
++	hs_req->r1_map_id = 0;
++	hs_req->r1_program_id = 0;
++	hs_req->r1_reset_id = 0;
++	hs_req->r1_dma = 0;
++	hs_req->r1_length = 0;
++	hs_req->r1_linear = false;
++}
++
++static bool dwc2_r1_measure_eligible(struct dwc2_hsotg *hsotg,
++				     struct dwc2_hsotg_ep *hs_ep,
++				     struct dwc2_hsotg_req *hs_req)
++{
++	struct usb_request *req = &hs_req->req;
++
++	return using_dma(hsotg) && !using_desc_dma(hsotg) && hs_ep->index &&
++	       !hs_ep->dir_in && hs_ep->ep.desc &&
++	       usb_endpoint_xfer_bulk(hs_ep->ep.desc) && req->length &&
++	       !req->sg_was_mapped && !req->num_sgs && req->dma_mapped &&
++	       !hs_req->saved_req_buf;
++}
++
++static void dwc2_r1_emit(struct dwc2_hsotg *hsotg,
++			 struct dwc2_hsotg_ep *hs_ep,
++			 struct dwc2_hsotg_req *hs_req,
++			 u8 stage, int result, bool snapshot_regs,
++			 dma_addr_t program_dma, u8 flags)
++{
++	u32 epctl = 0, epint = 0, epsiz = 0;
++	u64 epint_seq = 0;
++
++	if (!hs_req || !hs_req->r1_linear)
++		return;
++
++	if (!hs_ep->dir_in) {
++		epint_seq = hs_ep->r1_epint_seq;
++		if (snapshot_regs) {
++			epctl = dwc2_readl(hsotg, DOEPCTL(hs_ep->index));
++			epint = dwc2_readl(hsotg, DOEPINT(hs_ep->index));
++			epsiz = dwc2_readl(hsotg, DOEPTSIZ(hs_ep->index));
++		}
++	}
++
++	trace_dwc2_r1_lifetime(stage, hs_req->r1_req_id,
++			       hs_req->r1_map_id, hs_req->r1_program_id,
++			       hs_req->r1_reset_id, hs_ep->index,
++			       hs_req->r1_dma, program_dma,
++			       hs_req->r1_length, hs_req->req.actual,
++			       result, hs_req->req.status,
++			       hs_req->req.dma_mapped, epctl, epint, epsiz,
++			       epint_seq, flags);
++}
++
++static void dwc2_r1_measure_mapped(struct dwc2_hsotg *hsotg,
++				   struct dwc2_hsotg_ep *hs_ep,
++				   struct dwc2_hsotg_req *hs_req)
++{
++	if (!dwc2_r1_measure_eligible(hsotg, hs_ep, hs_req))
++		return;
++
++	hs_req->r1_req_id = atomic64_inc_return(&dwc2_r1_req_seq);
++	hs_req->r1_map_id = atomic64_inc_return(&dwc2_r1_map_seq);
++	hs_req->r1_program_id = 0;
++	hs_req->r1_reset_id = 0;
++	hs_req->r1_dma = hs_req->req.dma;
++	hs_req->r1_length = hs_req->req.length;
++	hs_req->r1_linear = true;
++	dwc2_r1_emit(hsotg, hs_ep, hs_req, DWC2_R1_MAP, 0, false, 0, 0);
++}
++
++static void dwc2_r1_measure_programmed(struct dwc2_hsotg *hsotg,
++				       struct dwc2_hsotg_ep *hs_ep,
++				       struct dwc2_hsotg_req *hs_req,
++				       bool dma_written)
++{
++	dma_addr_t program_dma = 0;
++
++	if (!hs_req || !hs_req->r1_linear || hs_ep->dir_in)
++		return;
++
++	hs_req->r1_program_id++;
++	if (dma_written)
++		program_dma = hs_req->req.dma;
++	dwc2_r1_emit(hsotg, hs_ep, hs_req, DWC2_R1_PROGRAMMED, 0,
++		     false, program_dma, dma_written ? 1 : 0);
++}
++
++static void dwc2_r1_measure_event(struct dwc2_hsotg *hsotg,
++				  struct dwc2_hsotg_ep *hs_ep,
++				  struct dwc2_hsotg_req *hs_req,
++				  u8 stage, int result, bool snapshot_regs)
++{
++	dwc2_r1_emit(hsotg, hs_ep, hs_req, stage, result,
++		     snapshot_regs, 0, 0);
++}
++
++static void dwc2_r1_measure_epint_enter(struct dwc2_hsotg_ep *hs_ep)
++{
++	if (hs_ep && !hs_ep->dir_in)
++		hs_ep->r1_epint_seq++;
++}
++
++static bool dwc2_r1_measure_reset_active(struct dwc2_hsotg_req *hs_req)
++{
++	return hs_req && hs_req->r1_linear && hs_req->r1_reset_id != 0;
++}
++
++static void dwc2_r1_measure_reset_entry(struct dwc2_hsotg *hsotg,
++					u32 gintsts)
++{
++	u64 reset_id = atomic64_inc_return(&dwc2_r1_reset_seq);
++	u8 flags = 0;
++	unsigned int idx;
++
++	if (gintsts & GINTSTS_USBRST)
++		flags |= BIT(0);
++	if (gintsts & GINTSTS_RESETDET)
++		flags |= BIT(1);
++
++	for (idx = 1; idx < hsotg->num_of_eps; idx++) {
++		struct dwc2_hsotg_ep *hs_ep = hsotg->eps_out[idx];
++		struct dwc2_hsotg_req *hs_req;
++
++		if (!hs_ep)
++			continue;
++		hs_req = hs_ep->req;
++		if (!hs_req || !hs_req->r1_linear)
++			continue;
++
++		hs_req->r1_reset_id = reset_id;
++		dwc2_r1_emit(hsotg, hs_ep, hs_req, DWC2_R1_RESET_ENTRY,
++			     0, true, 0, flags);
++	}
++}
++#else
++static inline void dwc2_r1_measure_reset(struct dwc2_hsotg_req *hs_req) { }
++static inline void dwc2_r1_measure_mapped(struct dwc2_hsotg *hsotg,
++					  struct dwc2_hsotg_ep *hs_ep,
++					  struct dwc2_hsotg_req *hs_req) { }
++static inline void dwc2_r1_measure_programmed(struct dwc2_hsotg *hsotg,
++					      struct dwc2_hsotg_ep *hs_ep,
++					      struct dwc2_hsotg_req *hs_req,
++					      bool dma_written) { }
++static inline void dwc2_r1_measure_event(struct dwc2_hsotg *hsotg,
++					 struct dwc2_hsotg_ep *hs_ep,
++					 struct dwc2_hsotg_req *hs_req,
++					 u8 stage, int result,
++					 bool snapshot_regs) { }
++static inline void dwc2_r1_measure_epint_enter(struct dwc2_hsotg_ep *hs_ep) { }
++static inline bool dwc2_r1_measure_reset_active(struct dwc2_hsotg_req *hs_req)
++{
++	return false;
++}
++static inline void dwc2_r1_measure_reset_entry(struct dwc2_hsotg *hsotg,
++					       u32 gintsts) { }
++#endif
++
+ /**
+  * dwc2_gadget_incr_frame_num - Increments the targeted frame number.
+  * @hs_ep: The endpoint
+@@ -1182,6 +1364,7 @@ static void dwc2_hsotg_start_req(struct dwc2_hsotg *hsotg,
+ 
+ 			dwc2_writel(hsotg, ureq->dma, dma_reg);
+ 
++
+ 			dev_dbg(hsotg->dev, "%s: %pad => 0x%08x\n",
+ 				__func__, &ureq->dma, dma_reg);
+ 		}
+@@ -1214,6 +1397,8 @@ static void dwc2_hsotg_start_req(struct dwc2_hsotg *hsotg,
+ 
+ 	dev_dbg(hsotg->dev, "%s: DxEPCTL=0x%08x\n", __func__, ctrl);
+ 	dwc2_writel(hsotg, ctrl, epctrl_reg);
++	dwc2_r1_measure_programmed(hsotg, hs_ep, hs_req,
++				   using_dma(hsotg) && !continuing && length != 0);
+ 
+ 	/*
+ 	 * set these, it seems that DMA support increments past the end
+@@ -1430,6 +1615,7 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
+ 	INIT_LIST_HEAD(&hs_req->queue);
+ 	req->actual = 0;
+ 	req->status = -EINPROGRESS;
++	dwc2_r1_measure_reset(hs_req);
+ 
+ 	/* Don't queue ISOC request if length greater than mps*mc */
+ 	if (hs_ep->isochronous &&
+@@ -1465,6 +1651,7 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
+ 		ret = dwc2_hsotg_map_dma(hs, hs_ep, req);
+ 		if (ret)
+ 			return ret;
++		dwc2_r1_measure_mapped(hs, hs_ep, hs_req);
+ 	}
+ 	/* If using descriptor DMA configure EP0 descriptor chain pointers */
+ 	if (using_desc_dma(hs) && !hs_ep->index) {
+@@ -2136,8 +2323,16 @@ static void dwc2_hsotg_complete_request(struct dwc2_hsotg *hsotg,
+ 	if (hs_req->req.status == -EINPROGRESS)
+ 		hs_req->req.status = result;
+ 
+-	if (using_dma(hsotg))
++	if (using_dma(hsotg)) {
++		dwc2_r1_measure_event(hsotg, hs_ep, hs_req,
++				       DWC2_R1_PRE_U, 0, true);
++		dwc2_r1_measure_event(hsotg, hs_ep, hs_req,
++				       DWC2_R1_UNMAP_BEGIN, result, false);
+ 		dwc2_hsotg_unmap_dma(hsotg, hs_ep, hs_req);
++		dwc2_r1_measure_event(hsotg, hs_ep, hs_req,
++				       DWC2_R1_UNMAP_DONE, result,
++				       dwc2_r1_measure_reset_active(hs_req));
++	}
+ 
+ 	dwc2_hsotg_handle_unaligned_buf_complete(hsotg, hs_ep, hs_req);
+ 
+@@ -3045,6 +3240,7 @@ static void dwc2_hsotg_epint(struct dwc2_hsotg *hsotg, unsigned int idx,
+ 	u32 epsiz_reg = dir_in ? DIEPTSIZ(idx) : DOEPTSIZ(idx);
+ 	u32 ints;
+ 
++	dwc2_r1_measure_epint_enter(hs_ep);
+ 	ints = dwc2_gadget_read_ep_interrupts(hsotg, idx, dir_in);
+ 
+ 	/* Clear endpoint interrupts */
+@@ -3074,6 +3270,8 @@ static void dwc2_hsotg_epint(struct dwc2_hsotg *hsotg, unsigned int idx,
+ 		ints &= ~DXEPINT_XFERCOMPL;
+ 
+ 	if (ints & DXEPINT_XFERCOMPL) {
++		dwc2_r1_measure_event(hsotg, hs_ep, hs_ep->req,
++				       DWC2_R1_XFERCOMPL_PATH, 0, false);
+ 		dev_dbg(hsotg->dev,
+ 			"%s: XferCompl: DxEPCTL=0x%08x, DXEPTSIZ=%08x\n",
+ 			__func__, dwc2_readl(hsotg, epctl_reg),
+@@ -3753,6 +3951,9 @@ static irqreturn_t dwc2_hsotg_irq(int irq, void *pw)
+ 
+ 		dwc2_writel(hsotg, GINTSTS_USBRST, GINTSTS);
+ 
++		/* Preserve active reset lineage before disconnect retires it. */
++		dwc2_r1_measure_reset_entry(hsotg, gintsts);
++
+ 		/* Report disconnection if it is not already done. */
+ 		dwc2_hsotg_disconnect(hsotg);
+ 
+@@ -3919,6 +4120,7 @@ static void dwc2_hsotg_ep_stop_xfr(struct dwc2_hsotg *hsotg,
+ {
+ 	u32 epctrl_reg;
+ 	u32 epint_reg;
++	int epdis_wait;
+ 
+ 	epctrl_reg = hs_ep->dir_in ? DIEPCTL(hs_ep->index) :
+ 		DOEPCTL(hs_ep->index);
+@@ -3976,10 +4178,16 @@ static void dwc2_hsotg_ep_stop_xfr(struct dwc2_hsotg *hsotg,
+ 	}
+ 
+ 	/* Disable ep */
++	dwc2_r1_measure_event(hsotg, hs_ep, hs_ep->req,
++			       DWC2_R1_EPDIS_ASSERT, 0, true);
+ 	dwc2_set_bit(hsotg, epctrl_reg, DXEPCTL_EPDIS | DXEPCTL_SNAK);
+ 
+-	/* Wait for ep to be disabled */
+-	if (dwc2_hsotg_wait_bit_set(hsotg, epint_reg, DXEPINT_EPDISBLD, 100))
++	/* Wait for ep to be disabled. Keep the natural polling loop untouched. */
++	epdis_wait = dwc2_hsotg_wait_bit_set(hsotg, epint_reg,
++					     DXEPINT_EPDISBLD, 100);
++	dwc2_r1_measure_event(hsotg, hs_ep, hs_ep->req,
++			       DWC2_R1_WAIT_RETURN, epdis_wait, true);
++	if (epdis_wait)
+ 		dev_warn(hsotg->dev,
+ 			 "%s: timeout DOEPCTL.EPDisable\n", __func__);
+ 
+diff --git a/drivers/usb/dwc2/trace-r1.h b/drivers/usb/dwc2/trace-r1.h
+new file mode 100644
+index 000000000..c06f7f292
+--- /dev/null
++++ b/drivers/usb/dwc2/trace-r1.h
+@@ -0,0 +1,85 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM dwc2_r1
++
++#if !defined(_TRACE_DWC2_R1_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_DWC2_R1_H
++
++#include <linux/tracepoint.h>
++
++TRACE_EVENT(dwc2_r1_lifetime,
++	TP_PROTO(u8 stage, u64 req_id, u64 map_id, u64 program_id,
++		 u64 reset_id, u8 ep_index, u64 dma_addr, u64 program_dma,
++		 u32 length, u32 actual, int result, int status,
++		 bool dma_mapped, u32 epctl, u32 epint, u32 epsiz,
++		 u64 epint_seq, u8 flags),
++
++	TP_ARGS(stage, req_id, map_id, program_id, reset_id, ep_index,
++		dma_addr, program_dma, length, actual, result, status,
++		dma_mapped, epctl, epint, epsiz, epint_seq, flags),
++
++	TP_STRUCT__entry(
++		__field(u8, stage)
++		__field(u64, req_id)
++		__field(u64, map_id)
++		__field(u64, program_id)
++		__field(u64, reset_id)
++		__field(u8, ep_index)
++		__field(u64, dma_addr)
++		__field(u64, program_dma)
++		__field(u32, length)
++		__field(u32, actual)
++		__field(int, result)
++		__field(int, status)
++		__field(bool, dma_mapped)
++		__field(u32, epctl)
++		__field(u32, epint)
++		__field(u32, epsiz)
++		__field(u64, epint_seq)
++		__field(u8, flags)
++	),
++
++	TP_fast_assign(
++		__entry->stage = stage;
++		__entry->req_id = req_id;
++		__entry->map_id = map_id;
++		__entry->program_id = program_id;
++		__entry->reset_id = reset_id;
++		__entry->ep_index = ep_index;
++		__entry->dma_addr = dma_addr;
++		__entry->program_dma = program_dma;
++		__entry->length = length;
++		__entry->actual = actual;
++		__entry->result = result;
++		__entry->status = status;
++		__entry->dma_mapped = dma_mapped;
++		__entry->epctl = epctl;
++		__entry->epint = epint;
++		__entry->epsiz = epsiz;
++		__entry->epint_seq = epint_seq;
++		__entry->flags = flags;
++	),
++
++	TP_printk("stage=%u req=%llu map=%llu program=%llu reset=%llu ep=%u dma=0x%llx program_dma=0x%llx len=%u actual=%u result=%d status=%d dma_mapped=%u epctl=0x%08x epint=0x%08x epsiz=0x%08x epint_seq=%llu flags=0x%x",
++		  __entry->stage,
++		  (unsigned long long)__entry->req_id,
++		  (unsigned long long)__entry->map_id,
++		  (unsigned long long)__entry->program_id,
++		  (unsigned long long)__entry->reset_id,
++		  __entry->ep_index,
++		  (unsigned long long)__entry->dma_addr,
++		  (unsigned long long)__entry->program_dma,
++		  __entry->length, __entry->actual, __entry->result,
++		  __entry->status, __entry->dma_mapped, __entry->epctl,
++		  __entry->epint, __entry->epsiz,
++		  (unsigned long long)__entry->epint_seq, __entry->flags)
++);
++
++#endif /* _TRACE_DWC2_R1_H */
++
++#undef TRACE_INCLUDE_PATH
++#define TRACE_INCLUDE_PATH ../../drivers/usb/dwc2
++#undef TRACE_INCLUDE_FILE
++#define TRACE_INCLUDE_FILE trace-r1
++
++#include <trace/define_trace.h>
