@@ -29,8 +29,8 @@ Repository completeness is gated by:
 ```
 
 `REPOSITORY_BASELINE: PASS` remains required to retain the baseline's
-`VERIFIED` state. The overall process currently exits nonzero at the independent
-holder-producer capability gate.
+`VERIFIED` state. The overall repository gate additionally checks the current
+source-foundation and holder-producer contracts.
 
 ## Epoch rule
 
@@ -52,10 +52,50 @@ provenance that produced the holder witness must be present, byte-verifiable,
 and contract-compatible with the active `holder_merger`.
 
 The repository gate first verifies the imported baseline bytes against
-`baseline/SHA256SUMS`, then resolves the validator/freezer contract, and finally
-checks that an active `holder_merger` has a structurally compatible producer.
-Missing or incompatible canonical sources are a hard failure, not an invitation
-to reconstruct them from documentation.
+`baseline/SHA256SUMS`, then resolves the validator/freezer contract, checks the
+canonical POST-UNMAP source foundation, and finally checks that an active
+`holder_merger` has a structurally compatible producer. Missing or incompatible
+canonical sources are a hard failure, not an invitation to reconstruct them
+from documentation.
+
+## POST-UNMAP source-foundation import
+
+The PRIMARY-A/PRIMARY-B source derivation was originally developed on
+`post-unmap-dma-g0`. That branch diverged from `main`, so it is **not** merged as
+a whole. Instead, the exact branch-head blobs needed to make the canonical
+checkout self-contained are imported into `main` from:
+
+```text
+source branch: post-unmap-dma-g0
+source head:   47dec94ca77e524cf3c6bb1990062d017f99330c
+```
+
+Exact imported Git blobs:
+
+```text
+docs/POST-UNMAP-DMA-G0.md               c690a68065344f4c8adb7c85902b1377316a1371
+docs/POST-UNMAP-DMA-L2.md               dbaaa287c7c02bc98b0be9ec238ac8f57f993dd1
+docs/POST-UNMAP-DMA-G2.5.md             035a1d3bcfb09a60f1690ab4e0a66071e8690704
+docs/POST-UNMAP-DMA-OBJECT-GATE.md      511c5d333362de2fe4133d6f51fd383bfa7b04bf
+docs/POST-UNMAP-DMA-G2.5-CANDIDATES.md  e935d02aeb9012ef91c6cc5d5dc24d8dce9136f9
+tools/dma_api_debug_gate.py              fb17ed9f62c7d2559e139727e0f88227331ece4f
+tools/capture_ep_dequeue_object_gate.py  5a287839d292fcc7c456e0cbb557902e2fa897cf
+```
+
+The two tool blobs are imported with the ledgers because those ledgers invoke
+them directly; importing documentation while leaving its executable dependency
+on another branch would reproduce the same structural defect.
+
+The imported source ledgers preserve their own frozen source-stage statements.
+For **current execution state**, later canonical documents on `main` control:
+`EVIDENCE-LADDER.md`, `RUNTIME-RUNBOOK.md`, `PENDING.md`, current hardware docs,
+and `INJURED-SURFACE-TABLE.md`. This precedence rule does not alter the imported
+source derivations; it prevents old source-stage status text from overriding a
+later runtime specification.
+
+The historical branch remains provenance only after this import. Current
+campaigns must resolve `K_sw`, `K_hw`, `PRIMARY-A`, `PRIMARY-B`, G2.5, and their
+support tools from `main` without checking out that branch.
 
 ## Device harness boundary
 
@@ -66,16 +106,24 @@ r1a-device/r1a_ffs_out_v2.c
 ```
 
 In the intended expanded predicate set, `device_harness` is load-bearing because
-the negative R1A result depends on the holder witness. The file now at the
-canonical path is a preserved legacy revision, not the compatible producer: it
-emits only `--artifact` summary output and cannot feed `holder_merge.py`.
+the negative R1A result depends on the holder witness. The historical v4.2
+package predates that expanded keyset and does not itself contain the canonical
+device-harness source.
 
-The historical v4.2 package predates that expanded keyset and does not itself
-contain the canonical device-harness source. Preserving an earlier device source
-does not rewrite the historical v4.2 epoch and does not close producer import.
+The historical fact is frozen explicitly as metadata **outside** `baseline/`:
+
+```text
+v4.2:
+    device_harness = ABSENT
+```
+
+This statement records absence; it does not add an artifact to v4.2. Any newly
+authored device harness, producer, observer helper, or runtime witness belongs to
+a new evidence epoch with its own bytes and identity. New bytes must never be
+attributed retroactively to an earlier evidence epoch.
 
 ## Historical note
 
-A more expanded predicate set (described during development as v3.2/v3.3) was discussed separately, including larger denominator/binding matrices and the device-harness epoch artifact. Its complete canonical artifact is not yet part of the current repository snapshot, so this repository does not claim those additional predicates as independently frozen here.
+A more expanded predicate set (described during development as v3.2/v3.3) was discussed separately, including larger denominator/binding matrices and the device-harness epoch artifact. Its complete canonical artifact is not retroactively attributed to the historical v4.2 package.
 
-They should be promoted only after the original archive/source set is imported, hash-verified, and made self-contained under the repository policy.
+Current expanded work is admitted only through the current repository contracts and exact artifacts carried on `main`.

@@ -1,16 +1,8 @@
 #!/bin/sh
 # Fail-closed repository integrity and campaign-readiness gate.
-#
-# This script intentionally fails while baseline/ is only a fragment.
-# Baseline integrity and holder-producer readiness are reported independently:
-# a canonical v4.2 baseline can remain intact while the next campaign is
-# blocked because its device producer cannot satisfy the active holder merger.
 set -u
 
-# The repository gate must be read-only with respect to its own evidence tree.
-# Python bytecode caches would change the archive Git-tree identity merely by
-# running verification, so suppress them inside the gate rather than relying on
-# the caller's environment.
+# Running verification must not mutate the evidence tree via Python caches.
 PYTHONDONTWRITEBYTECODE=1
 export PYTHONDONTWRITEBYTECODE
 
@@ -20,6 +12,7 @@ cd "$ROOT" || exit 2
 fail=0
 baseline_fail=0
 holder_fail=0
+foundation_fail=0
 
 pass() { printf '%-34s %s\n' "$1" PASS; }
 failmsg() { printf '%-34s %s\n' "$1" FAIL >&2; fail=1; }
@@ -38,13 +31,9 @@ else
         pass baseline_sha256_complete
     else
         failmsg baseline_sha256_complete
-        # Keep the failure auditable without flooding normal PASS output.
         sed 's/^/  /' "$tmp" >&2
     fi
 
-    # Presence in a developer's working tree is not enough: every pinned path
-    # must actually be carried by Git.  This prevents an ignored/untracked file
-    # copied in by hand from making a dirty checkout look self-contained.
     if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         tracked_bad=0
         ignored_bad=0
@@ -56,31 +45,17 @@ else
                 printf '  untracked pinned path: %s\n' "$full" >&2
                 tracked_bad=1
             fi
-            # --no-index evaluates ignore policy even for an already tracked
-            # file. A pinned artifact that policy would ignore after restore is
-            # an unsatisfiable repository contract unless explicitly negated.
             if git check-ignore --no-index -q -- "$full" 2>/dev/null; then
                 printf '  ignored pinned path: %s\n' "$full" >&2
                 ignored_bad=1
             fi
         done < baseline/SHA256SUMS
 
-        if [ "$tracked_bad" -eq 0 ]; then
-            pass baseline_pins_tracked
-        else
-            failmsg baseline_pins_tracked
-        fi
-        if [ "$ignored_bad" -eq 0 ]; then
-            pass baseline_pins_not_ignored
-        else
-            failmsg baseline_pins_not_ignored
-        fi
+        if [ "$tracked_bad" -eq 0 ]; then pass baseline_pins_tracked; else failmsg baseline_pins_tracked; fi
+        if [ "$ignored_bad" -eq 0 ]; then pass baseline_pins_not_ignored; else failmsg baseline_pins_not_ignored; fi
     else
-        # GitHub source archives intentionally omit .git.  Do not convert that
-        # packaging fact into an integrity bypass: require an archive-native
-        # proof bound to the exact tracked baseline subtree and ignore policy.
         archive_tmp=${TMPDIR:-/tmp}/dwc2-archive-tracking.$$
-        if [ -f verify_archive_tracking.py ] &&            python3 verify_archive_tracking.py "$ROOT" >"$archive_tmp" 2>&1; then
+        if [ -f verify_archive_tracking.py ] && python3 verify_archive_tracking.py "$ROOT" >"$archive_tmp" 2>&1; then
             pass baseline_pins_tracked
             pass baseline_pins_not_ignored
             pass archive_tracking_proof
@@ -96,28 +71,14 @@ fi
 VALIDATOR=baseline/pipeline/r1a_manifest.py
 FREEZER=baseline/pipeline/freeze_epoch.py
 
-if [ -f "$VALIDATOR" ]; then
-    pass epoch_validator_present
-else
-    failmsg epoch_validator_present
-    printf '  missing: %s\n' "$VALIDATOR" >&2
-fi
+if [ -f "$VALIDATOR" ]; then pass epoch_validator_present; else failmsg epoch_validator_present; printf '  missing: %s\n' "$VALIDATOR" >&2; fi
+if [ -f "$FREEZER" ]; then pass epoch_freezer_present; else failmsg epoch_freezer_present; printf '  missing: %s\n' "$FREEZER" >&2; fi
 
-if [ -f "$FREEZER" ]; then
-    pass epoch_freezer_present
-else
-    failmsg epoch_freezer_present
-    printf '  missing: %s\n' "$FREEZER" >&2
-fi
-
-# Parse EPOCH_ARTIFACTS without importing the baseline code.  This prevents a
-# broken or incomplete package from turning the checker itself into evidence.
 if [ -f "$VALIDATOR" ]; then
     if python3 - "$VALIDATOR" <<'PY'
 import ast
 import sys
 from pathlib import Path
-
 p = Path(sys.argv[1])
 tree = ast.parse(p.read_text(), filename=str(p))
 value = None
@@ -133,40 +94,46 @@ if len(set(value)) != len(value):
     raise SystemExit('EPOCH_ARTIFACTS contains duplicate keys')
 print('  EPOCH_ARTIFACTS:', ', '.join(value))
 PY
-    then
-        pass epoch_keyset_parse
-    else
-        failmsg epoch_keyset_parse
-    fi
+    then pass epoch_keyset_parse; else failmsg epoch_keyset_parse; fi
 else
     failmsg epoch_keyset_parse
 fi
 
-# The freezer's check-only mode is the executable resolver for the local epoch
-# contract.  It must succeed only after all load-bearing local modules exist
-# and the validator/freezer/gate agree on the keyset.
 if [ -f "$VALIDATOR" ] && [ -f "$FREEZER" ]; then
-    if python3 "$FREEZER" --epoch-id REPOSITORY-CHECK --check-only >/tmp/dwc2-epoch-check.$$ 2>&1; then
+    epoch_tmp=${TMPDIR:-/tmp}/dwc2-epoch-check.$$
+    if python3 "$FREEZER" --epoch-id REPOSITORY-CHECK --check-only >"$epoch_tmp" 2>&1; then
         pass epoch_local_resolution
     else
         failmsg epoch_local_resolution
-        sed 's/^/  /' /tmp/dwc2-epoch-check.$$ >&2
+        sed 's/^/  /' "$epoch_tmp" >&2
     fi
-    rm -f /tmp/dwc2-epoch-check.$$
+    rm -f "$epoch_tmp"
 else
     failmsg epoch_local_resolution
 fi
 
-# Snapshot baseline integrity before checking repository-external campaign
-# sources.  A later producer failure must never be mislabeled as a damaged
-# canonical archive requiring re-import.
 baseline_fail=$fail
 
-# 3. Canonical load-bearing harness source locations for the next campaign.
-# These are repository-source completeness checks, not runtime binary hashes.
+# 3. Canonical load-bearing harness source locations.
 for spec in \
     'host_source:r1a-host/r1a_host.c' \
     'device_source:r1a-device/r1a_ffs_out_v2.c'
+do
+    label=${spec%%:*}
+    path=${spec#*:}
+    if [ -f "$path" ]; then pass "$label"; else failmsg "$label"; printf '  missing: %s\n' "$path" >&2; fi
+done
+
+# 4. Canonical POST-UNMAP source foundation. A clean main checkout must carry
+# every definition/tool used by L2, G2.5, PRIMARY-A and PRIMARY-B.
+for spec in \
+    'foundation_g0:docs/POST-UNMAP-DMA-G0.md' \
+    'foundation_l2:docs/POST-UNMAP-DMA-L2.md' \
+    'foundation_g25:docs/POST-UNMAP-DMA-G2.5.md' \
+    'foundation_object_gate:docs/POST-UNMAP-DMA-OBJECT-GATE.md' \
+    'foundation_candidates:docs/POST-UNMAP-DMA-G2.5-CANDIDATES.md' \
+    'foundation_dma_api_tool:tools/dma_api_debug_gate.py' \
+    'foundation_object_tool:tools/capture_ep_dequeue_object_gate.py'
 do
     label=${spec%%:*}
     path=${spec#*:}
@@ -175,13 +142,60 @@ do
     else
         failmsg "$label"
         printf '  missing: %s\n' "$path" >&2
+        foundation_fail=1
     fi
 done
 
-# Presence alone is not capability.  Because holder_merger is in the active
-# keyset, the device source must expose the JSONL producer contract consumed by
-# baseline/pipeline/holder_merge.py.  The checker also fails if the consumer
-# contract drifts, so a stale hard-coded test cannot silently remain green.
+if python3 - <<'PY'
+from pathlib import Path
+requirements = {
+    'docs/POST-UNMAP-DMA-L2.md': ['K_sw_ATTEMPTED', 'K_hw', 'PRIMARY-A', 'PRIMARY-B'],
+    'docs/POST-UNMAP-DMA-G2.5.md': ['TARGET_BUILD_ID', 'PRIMARY-A', 'PRIMARY-B'],
+    'docs/POST-UNMAP-DMA-OBJECT-GATE.md': ['PENDING_OBJECT_GATE', 'OBJECT-PROVEN', 'KILLED'],
+    'docs/POST-UNMAP-DMA-G0.md': ['DMA_API_DEBUG', 'tools/dma_api_debug_gate.py'],
+}
+for path, tokens in requirements.items():
+    text = Path(path).read_text()
+    for token in tokens:
+        if token not in text:
+            raise SystemExit(f'{path}: missing canonical token {token}')
+PY
+then
+    pass source_foundation_semantics
+else
+    failmsg source_foundation_semantics
+    foundation_fail=1
+fi
+
+if grep -Fq 'SUPERSEDED BY v4 — do not run' r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v3.RECEIPT.txt; then
+    pass v3_supersession_marked
+else
+    failmsg v3_supersession_marked
+    foundation_fail=1
+fi
+
+if grep -Fq 'HISTORICAL SNAPSHOT — SUPERSEDED' docs/RESEARCH-GAPS-2026-09-08.md; then
+    pass research_gap_snapshot_marked
+else
+    failmsg research_gap_snapshot_marked
+    foundation_fail=1
+fi
+
+for branch_name in audit-trail canonical-v4.2-reimport holder-v2.3 holder-v2.3-staging post-unmap-dma-g0 restore-g0-g1
+do
+    if ! grep -Fq "\`$branch_name\`" docs/REPOSITORY-POLICY.md; then
+        printf '  missing branch classification: %s\n' "$branch_name" >&2
+        foundation_fail=1
+        fail=1
+    fi
+done
+if [ "$foundation_fail" -eq 0 ]; then
+    pass branch_and_source_policy
+else
+    printf '%-34s %s\n' branch_and_source_policy FAIL >&2
+fi
+
+# 5. Holder producer contract and discriminating controls.
 holder_tmp=${TMPDIR:-/tmp}/dwc2-holder-contract.$$
 if python3 verify_holder_contract.py >"$holder_tmp" 2>&1; then
     pass holder_producer_contract
@@ -192,10 +206,6 @@ else
 fi
 rm -f "$holder_tmp"
 
-# A checker nobody runs is a checker that can rot, and a discriminating control
-# that is only listed in a document is not executable.  These are mandatory.
-# holder_roundtrip.py builds the producer from source, so a C compiler is now a
-# gate requirement; without one it reports "cannot run" and this fails.
 for spec in \
     'holder_contract_selftest:verify_holder_contract_selftest.py' \
     'holder_log_guard_selftest:holder_log_guard_selftest.py' \
@@ -224,6 +234,12 @@ if [ "$baseline_fail" -eq 0 ]; then
     printf '%s\n' 'REPOSITORY_BASELINE: PASS'
 else
     printf '%s\n' 'REPOSITORY_BASELINE: INCOMPLETE / RE-IMPORT REQUIRED' >&2
+fi
+
+if [ "$foundation_fail" -eq 0 ]; then
+    printf '%s\n' 'SOURCE_FOUNDATION: PASS'
+else
+    printf '%s\n' 'SOURCE_FOUNDATION: FAIL / MAIN NOT SELF-CONTAINED' >&2
 fi
 
 if [ "$holder_fail" -ne 0 ]; then

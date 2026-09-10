@@ -1,3 +1,5 @@
+SUPERSEDED BY v4 — do not run
+superseded_reason=V3 UNMAP_DONE may read request/mapping-derived scalars after U; V4 enforces stable-lineage plus raw-MMIO-only post-U observation
 kernel_pin=f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
 v1_base_commit=ccf49e5c0cf20f17bcc96465b2a3e37392cf49cb
 v2_transform_commit=2e7b4fd3d7c0e43f785027fb6885d4103020d682

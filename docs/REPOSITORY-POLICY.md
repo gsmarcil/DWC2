@@ -11,6 +11,7 @@ This private repository is the canonical research workspace for the DWC2 investi
 - the gadget-side holder harness under `r1a-device/`;
 - the DWC2 observer/patch chain and its verification tools;
 - the canonical harness specification;
+- the source-foundation ledgers that define campaign vocabulary and derivation (`docs/POST-UNMAP-DMA-*.md`) together with any tools those ledgers directly require;
 - top-level verification entry points;
 - clean-room and build evidence that supports a surviving claim;
 - documentation separating CONFIRMED from PENDING/UNKNOWN.
@@ -49,10 +50,11 @@ At minimum the gate must establish:
 1. every path pinned by `baseline/SHA256SUMS` exists and matches its pinned SHA256; and
 2. the checked-in validator/freezer can resolve the active local
    `EPOCH_ARTIFACTS` contract from real files in the repository; and
-3. an active holder merger has a producer exposing its event-log schema.
+3. an active holder merger has a producer exposing its event-log schema; and
+4. every source-foundation document or support tool referenced by the current campaign vocabulary is present on `main`.
 
 The gate must fail closed when the validator, freezer, host source, device source,
-or another load-bearing source is missing or incompatible. Its output separates
+source-foundation ledger/tool, or another load-bearing source is missing or incompatible. Its output separates
 baseline integrity from campaign readiness: a baseline failure requires
 canonical re-import, while a producer-capability failure leaves the authenticated
 baseline intact and blocks the campaign.
@@ -76,6 +78,24 @@ Past development is represented on the `audit-trail` branch as a **RECONSTRUCTED
 5. the artifact/hash that anchors the change, when available.
 
 The chronology is explanatory evidence, not a claim that the reconstructed commits were created at their historical dates.
+
+## Branch status contract
+
+`main` is the **only canonical current workspace**. A long-lived non-`main` branch may be retained for provenance, audit chronology, staging history, or recovery, but it must be classified here before its contents are cited by current documentation. An unlisted branch is `UNCLASSIFIED` and must not supply a definition, executable tool, or load-bearing artifact to a hardware campaign.
+
+The table below records the reviewed role and head at this classification point. Moving a retained branch requires updating its classification in the same repository change.
+
+| Branch | Status | Reviewed head | Allowed use |
+|---|---|---|---|
+| `main` | `CANONICAL_ACTIVE` | updated by normal fast-forward commits | sole source of current definitions, tools, runbooks, and campaign state |
+| `audit-trail` | `HISTORICAL_AUDIT_ONLY` | `110f525b060ab288a0768abd4cd9ce215d97a497` | reconstructed chronology only; never current execution state |
+| `canonical-v4.2-reimport` | `HISTORICAL_IMPORT_ANCESTOR` | `9e63c13144f2a3191e01710fbcb23804be182a71` | v4.2 re-import provenance; already ancestral to `main` |
+| `holder-v2.3-staging` | `HISTORICAL_STAGING_ANCESTOR` | `9df7b1a4f91a10ef575daa4a658a69ec5ce5723f` | staging provenance; already ancestral to `main` |
+| `holder-v2.3` | `PRESERVED_UNMERGED_HOLDER_CLOSURE` | `4635cff2c383d91f9170f90828b241854a155888` | historical holder closure candidate only; not canonical unless explicitly reconciled into `main` |
+| `post-unmap-dma-g0` | `SOURCE_IMPORT_ORIGIN_FROZEN` | `47dec94ca77e524cf3c6bb1990062d017f99330c` | origin/provenance for the imported POST-UNMAP source foundation; current use is from `main` only |
+| `restore-g0-g1` | `HISTORICAL_RECOVERY_ANCESTOR` | `bb84d0b6c07aaaf781726b7b49612feaf7e40f96` | recovery chronology; already ancestral to `main` |
+
+Retaining these refs does not make them peers of `main`. Before any evidence-bearing hardware epoch, every definition and executable dependency named by the current runbook must resolve from a clean checkout of `main` alone.
 
 ## Current epistemic labels
 

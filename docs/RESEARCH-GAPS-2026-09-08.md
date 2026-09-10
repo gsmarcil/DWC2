@@ -1,6 +1,8 @@
 # Research gap review — 2026-09-08
 
-This document is the current execution order for closing the DWC2 research record. It does not promote any pending claim.
+> **HISTORICAL SNAPSHOT — SUPERSEDED.** This file records the execution plan as it stood on 2026-09-08. It is retained for audit chronology and must not be used as the current run order. Current state and execution semantics live in `EVIDENCE-LADDER.md`, `RUNTIME-RUNBOOK.md`, `PENDING.md`, `HARDWARE-ACQUISITION-GATE.md`, `INJURED-SURFACE-TABLE.md`, and the `POST-UNMAP-DMA-*` source-foundation ledgers now carried on `main`.
+
+This document records the historical execution order for closing the DWC2 research record as of 2026-09-08. It does not promote any pending claim and does not override later canonical documents.
 
 ## Repository prerequisites
 
