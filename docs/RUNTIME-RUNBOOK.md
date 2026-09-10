@@ -21,7 +21,7 @@ Reset/disconnect handling is a separate PRIMARY-A branch. It must not inherit th
 4. Verify host endpoint identity and device holder endpoint identity match.
 5. Run the two-arm re-arm discriminator and record whether `USBDEVFS_RESETEP` is required.
 6. Establish sensitivity from observer counters, usbmon and holder evidence.
-7. For reset/disconnect work, capture the exact controller identity (`GSNPSID` plus any integration/revision facts needed to select the correct databook) before making any hardware-contract statement.
+7. For reset/disconnect work, capture the raw controller signature `{GSNPSID, GHWCFG1, GHWCFG2, GHWCFG3, GHWCFG4}` from the same boot/configuration epoch before making any hardware-contract statement. `GSNPSID` alone is insufficient to select a load-bearing DMA/reset contract.
 
 ## Per-attempt validity
 
@@ -187,7 +187,7 @@ The source ordering matters for instrumentation design: the top-level gadget IRQ
 
 Do not use product pages, old Raspberry Pi source comments, or a generic DWC2 implementation as load-bearing hardware evidence. They may be retained as `WEAK_SIGNAL` only.
 
-After reading the running `GSNPSID`, select the exact controller databook/revision if obtainable and classify exactly one result:
+After reading the running `{GSNPSID, GHWCFG1, GHWCFG2, GHWCFG3, GHWCFG4}` tuple, select a databook/revision only if its core revision and applicable synthesized configuration match the observed signature. A revision-only match is insufficient. Then classify exactly one result:
 
 ```text
 explicit text says reset terminates/quiesces pending device DMA
@@ -235,6 +235,30 @@ UNMAP_DONE:
 ```
 
 The reset observer must not write `DOEPINT`, add a stop/NAK, change IRQ ordering, or modify map/unmap behavior.
+
+`UNMAP_DONE` is post-U and is register-only apart from stable lineage metadata. Its mapping/request-payload slots must be zero sentinels (`dma_addr`, `program_dma`, `length`, `actual`, `result`, `status`, `dma_mapped` all zero). After the real unmap returns, the observer may read only stable lineage/endpoint bookkeeping and the raw `DOEPCTL` / `DOEPINT` / `DOEPTSIZ` MMIO needed for the reset discriminator; it must not read `req->dma`/`req->buf`, touch the request buffer, call `dma_sync_*`, remap, or add a memory-side witness.
+
+### Mandatory three-arm reset discriminator
+
+Run and preserve all three arms under the same observer/controller/configuration fingerprint:
+
+```text
+CTRL-IDLE
+  no eligible live OUT transfer at reset
+  detects reset-synthesized/reasserted XferCompl
+
+CTRL-COMPLETED
+  same transfer class completes naturally first
+  positive natural completion witness precedes reset
+  reset follows after a recorded, pre-frozen interval
+  detects late/stale completion reporting
+
+CAMPAIGN-LIVE
+  same transfer class is positively outstanding at RESET_ENTRY
+  tests the surviving reset branch
+```
+
+`CTRL-COMPLETED` should show `XferCompl` already present at `RESET_ENTRY` when it has not been naturally W1C-serviced. If the normal endpoint interrupt cleared it before reset, the control remains usable for the stronger question: it must not produce a new post-reset `0 -> 1`. Any post-reset `0 -> 1` in either `CTRL-IDLE` or `CTRL-COMPLETED` makes the campaign transition non-discriminating and forces `R1A_AMBIGUOUS`. Freeze the control denominators, completed-to-reset interval, and completion witness before campaign execution.
 
 Reset-specific interpretation is frozen as follows:
 
@@ -337,7 +361,7 @@ records[S1.count:S2.count]
 - any observed W1C clear event between PRE and RESULT;
 - four-state `EPDIS_RESULT`;
 - `UNMAP_BEGIN` / `UNMAP_DONE` for the same lineage;
-- reset branch: exact `GSNPSID`, selected databook identity/result, `K_hw`, `reset_generation`, `RESET_ENTRY`, reset-safe `PRE_U`, and reset-safe `UNMAP_DONE` raw `DOEPINT`/`DOEPTSIZ`;
+- reset branch: raw `{GSNPSID, GHWCFG1, GHWCFG2, GHWCFG3, GHWCFG4}` controller signature, selected databook identity/applicability/result, `K_hw`, `CTRL-IDLE`, `CTRL-COMPLETED`, `CAMPAIGN-LIVE`, `reset_generation`, `RESET_ENTRY`, reset-safe `PRE_U`, and register-only reset-safe `UNMAP_DONE` raw `DOEPCTL`/`DOEPINT`/`DOEPTSIZ`;
 - exact image/tool hashes and epoch block;
 - final gate JSON and generated verdict;
 - SHA256 for every artifact.
@@ -362,6 +386,8 @@ RESET-A  active request lineage is captured before disconnect/kill
 RESET-B  no SNAK/EPDIS/quiesce action is added by measurement
 RESET-C  reset IRQ ordering is unchanged
 RESET-D  UNMAP_DONE register snapshot occurs only after the real unmap returns
+RESET-E  UNMAP_DONE has zero mapping/request-payload reads and emits lineage + raw MMIO only
+RESET-F  both idle-reset and completed-then-reset controls are frozen before campaign promotion
 ```
 
 Failure of any item blocks the instrument regardless of whether it compiles.

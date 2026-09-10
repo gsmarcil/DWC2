@@ -93,6 +93,20 @@ if [ -n "$DWC2_DIR" ]; then
     "$OUT/dwc2-hw_params.txt" "$OUT/dwc2-params.txt" 2>/dev/null \
     | tee "$OUT/pi-fb2-effective.txt" || true
 
+  grep -Ei 'GSNPSID|GHWCFG1|GHWCFG2|GHWCFG3|GHWCFG4' \
+    "$OUT/dwc2-regdump.txt" 2>/dev/null \
+    | tee "$OUT/pi-controller-signature-raw.txt" || true
+
+  if ! grep -qi 'GSNPSID' "$OUT/pi-controller-signature-raw.txt" || \
+     ! grep -qi 'GHWCFG1' "$OUT/pi-controller-signature-raw.txt" || \
+     ! grep -qi 'GHWCFG2' "$OUT/pi-controller-signature-raw.txt" || \
+     ! grep -qi 'GHWCFG3' "$OUT/pi-controller-signature-raw.txt" || \
+     ! grep -qi 'GHWCFG4' "$OUT/pi-controller-signature-raw.txt"; then
+    printf 'CONTROLLER_SIGNATURE_INCOMPLETE\n' | tee "$OUT/pi-controller-signature.status"
+  else
+    printf 'CONTROLLER_SIGNATURE_COMPLETE\n' | tee "$OUT/pi-controller-signature.status"
+  fi
+
   GHWCFG4_HEX="$(grep -i 'GHWCFG4' "$OUT/dwc2-regdump.txt" 2>/dev/null \
       | grep -o '0x[0-9A-Fa-f]\+' | tail -n1 || true)"
   if [ -n "$GHWCFG4_HEX" ]; then
@@ -119,7 +133,7 @@ PI-FB2:
   GHWCFG4.DESC_DMA = 1 + g_dma_desc=1    -> PRIMARY-B capability survives on Pi
 ```
 
-`GHWCFG4.DESC_DMA` is bit 30. Keep the raw register dump as the primary artifact, not only the decoded value.
+`GHWCFG4.DESC_DMA` is bit 30. Keep the raw register dump as the primary artifact, not only the decoded value. For reset/databook work, the load-bearing controller match key is the same-epoch raw tuple `{GSNPSID, GHWCFG1, GHWCFG2, GHWCFG3, GHWCFG4}`; `GSNPSID` alone is never sufficient.
 
 ## 3. Role/overlay diagnosis only if PI-FB1 is blocked
 

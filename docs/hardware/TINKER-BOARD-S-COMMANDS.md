@@ -107,8 +107,9 @@ if [ -n "$DWC2_DIR" ]; then
     "$OUT/dwc2-hw_params.txt" "$OUT/dwc2-params.txt" 2>/dev/null \
     | tee "$OUT/rk-fb2-effective.txt" || true
 
-  grep -Ei 'GHWCFG2|GHWCFG4' "$OUT/dwc2-regdump.txt" 2>/dev/null \
-    | tee "$OUT/rk-fb2-hwcfg-raw.txt" || true
+  grep -Ei 'GSNPSID|GHWCFG1|GHWCFG2|GHWCFG3|GHWCFG4' \
+    "$OUT/dwc2-regdump.txt" 2>/dev/null \
+    | tee "$OUT/rk-controller-signature-raw.txt" || true
 
   GHWCFG4_HEX="$(grep -i 'GHWCFG4' "$OUT/dwc2-regdump.txt" 2>/dev/null \
       | grep -o '0x[0-9A-Fa-f]\+' | tail -n1 || true)"
@@ -136,7 +137,7 @@ RK-FB2:
   GHWCFG4.DESC_DMA = 1 + effective g_dma_desc=1   -> PRIMARY-B capability survives
 ```
 
-A board-role failure is not authorization to buy Firefly. First determine whether it is a board configuration/DT/connector problem or a SoC-wide limitation.
+For reset/databook work, preserve `{GSNPSID, GHWCFG1, GHWCFG2, GHWCFG3, GHWCFG4}` from the same epoch and require databook applicability to both the core revision and synthesized configuration. A board-role failure is not authorization to buy Firefly. First determine whether it is a board configuration/DT/connector problem or a SoC-wide limitation.
 
 ## 3. RK-G25 stock-kernel topology capture
 

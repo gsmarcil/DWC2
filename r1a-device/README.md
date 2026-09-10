@@ -28,6 +28,20 @@ The active producer's source is admitted by executable repository gates.
 Structural and synthetic round-trip tests do **not** substitute for execution on
 a real DWC2 UDC.
 
+## Current reset-capable observer artifact
+
+The current pre-hardware observer patch is:
+
+```text
+instrumentation/R1A-RESET-INSTRUMENTATION-v4.patch
+SHA256 d27b292633fe78a9ee5adc087ed0357fd3a0dbee6c9923474fb32f04dc2df6d7
+```
+
+Its receipt records standalone apply, measurement-disabled build,
+measurement-enabled build, semantic fail-closed checks, and
+`unmap_done_mapping_payload_reads=ZERO`. V3 remains historical evidence and is
+not the preferred hardware epoch after this refinement.
+
 ## Holder witness contract
 
 The device harness is distinct from the host `usbmon` witness:

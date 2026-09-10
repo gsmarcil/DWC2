@@ -82,7 +82,7 @@ The reset branch also has an IRQ-ordering constraint: the top-level gadget IRQ h
 
 #### Reset hardware contract `K_hw`
 
-Only an exact controller databook/revision matched to the running hardware identity (`GSNPSID` and any required integration revision) may carry the hardware-contract claim. Product pages, legacy Raspberry Pi source comments, and third-party implementations are at most `WEAK_SIGNAL` and are excluded from load-bearing report evidence.
+Only an exact controller databook/revision matched to the running controller signature may carry the hardware-contract claim. The minimum signature is the raw tuple `{GSNPSID, GHWCFG1, GHWCFG2, GHWCFG3, GHWCFG4}` from the same boot/configuration epoch. `GSNPSID` identifies the core revision but does not, by itself, establish the synthesized DMA/endpoint configuration. The selected databook must apply to that revision and to the observed `GHWCFG1..4` configuration relevant to reset/DMA semantics; if that applicability cannot be established, `K_hw` remains `UNDETERMINED`. Product pages, legacy Raspberry Pi source comments, and third-party implementations are at most `WEAK_SIGNAL` and are excluded from load-bearing report evidence.
 
 The hardware-contract result is frozen as exactly one of:
 
@@ -96,7 +96,7 @@ or software must explicitly NAK/disable/quiesce the endpoint
     -> K_hw = ABSENT
     -> real promotion: reset itself is not a quiescence guarantee
 
-no explicit text for the matched controller revision
+no explicit text for the matched controller revision/configuration
     -> K_hw = UNDETERMINED
     -> no movement in the evidence ladder
 ```
@@ -118,6 +118,32 @@ raw DOEPTSIZ
 ```
 
 The measurement code remains read-only with respect to `DOEPINT` and must not reorder the reset/disconnect path.
+
+`UNMAP_DONE` occurs after U and therefore has a stricter payload rule than earlier events. It may emit only stable lineage metadata (`reset/request/map/program`, endpoint, endpoint-interrupt generation) plus raw endpoint MMIO (`DOEPCTL`, `DOEPINT`, `DOEPTSIZ`). Mapping/request-payload fields are zero sentinels at this stage: `dma_addr=0`, `program_dma=0`, `length=0`, `actual=0`, `result=0`, `status=0`, `dma_mapped=0`. The `UNMAP_DONE` path must not read `req->dma`, `req->buf`, a saved/alignment buffer, or invoke `dma_sync_*`, another map/unmap, or any memory-side witness helper after the real unmap has returned.
+
+#### Mandatory reset transition controls
+
+A campaign `0 -> 1` `XferCompl` transition is discriminating only when **both** negative-control classes have passed in the same frozen controller/observer configuration:
+
+```text
+CTRL-IDLE / idle-reset
+    no eligible live OUT transfer at reset
+    purpose: detect XferCompl synthesized/reasserted by reset itself
+
+CTRL-COMPLETED / completed-then-reset
+    matching OUT transfer has a positive natural completion witness
+    reset follows after a recorded, pre-frozen interval
+    purpose: detect delayed/stale completion reporting from a transfer
+             that was already complete before reset
+
+CAMPAIGN-LIVE / live-then-reset
+    matching OUT transfer is positively outstanding at RESET_ENTRY
+    purpose: test the surviving reset branch
+```
+
+For `CTRL-COMPLETED`, `XferCompl` high at `RESET_ENTRY` is the direct expected signature when the bit has not already been naturally W1C-serviced. It is **not** made an unconditional validity requirement, because the ordinary endpoint-interrupt path may legitimately clear a completed transfer before the later reset. The fail-closed discriminator is stronger: if an already-completed control can show `RESET_ENTRY.XferCompl=0` followed by a new `0 -> 1` assertion after reset, then the same transition in `CAMPAIGN-LIVE` is non-discriminating and is `R1A_AMBIGUOUS`, not promotion evidence. Likewise, any post-reset `0 -> 1` in `CTRL-IDLE` kills the transition as an attribution discriminator.
+
+Control counts, the completed-to-reset interval, and the exact host completion witness must be frozen before the campaign; they are not chosen after seeing campaign output.
 
 A fresh same-lineage `XferCompl` transition observed before U is terminal and yields `R1A_DEAD` for that attempt. For reset-safe register attribution, a transition is considered fresh only when the earlier snapshot had `XferCompl` clear, the later snapshot has it set, request/map/program generations are unchanged, and no endpoint-interrupt-handler entry or re-programming occurred between the two snapshots. A bit already high at the first reset snapshot is not silently treated as fresh; without an independently attributable completion-path event it is `AMBIGUOUS`.
 
