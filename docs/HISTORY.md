@@ -97,3 +97,48 @@ severity                     UNRESOLVED
 ```
 
 A separately developed, more expanded predicate matrix was discussed later in development. Because its complete archive is not present in this repository snapshot, it is not promoted here until imported and reverified.
+
+## Sibling-driver record added 2026-09-11
+
+External material was checked against primary sources and recorded in
+`INJURED-SURFACE-TABLE.md`, each entry labelled by what verified it.
+
+Verified merged in mainline by subject match:
+
+```text
+cea2a1257a3b  2026-01-08  chipidea: fix DMA and SG cleanup in _ep_nuke()
+0bddda5a1166  2026-06-23  mtu3: unmap request DMA on queue failure
+d5e5cd3654d2  2026-07-16  dummy_hcd: prevent fifo_req reuse during giveback
+06d9db7273c7  2013-03-15  musb: unmap_dma_buffer only for valid DMA addr
+```
+
+`CVE-2026-43250` covers the chipidea commit and is confirmed on NVD and
+cve.org at CVSS 7.8. It is the closest external analogue: an exceptional
+teardown path returned requests without mirroring the normal path's unmap.
+
+The DWC3 precedent chain was bound to mainline with author dates
+(`e4cf6580ac74`, `2b2da6574e77`, then `76bff31c7fba`, `4db0fbb60136`,
+`c4e3ef568539`), carrying the scope limit that `e4cf6580ac74` speaks of
+DWC_usb3x while DWC2 is DWC_otg.
+
+Recorded as leads rather than evidence, because they could not be verified from
+the environment used: the tegra-xudc drain-before-unmap report, and the Fuchsia
+quarantine commit `4caf5d06d7f8`, which stands at
+`MIRROR_VERIFIED / ORIGINAL_PENDING` with its third-party mirror named.
+
+An independent finding came out of the same checking: `dwc2_hsotg_rx_data()` at
+`08df8841` still does not clamp `to_read` to `max_req`, so both halves of the
+PIO RX frozen claim are present in current mainline and not only at the pinned
+ref.
+
+None of this moves the evidence ladder. It is precedent and context; DWC2
+`K_hw` remains `UNDETERMINED`.
+
+## Provenance episode 2026-09-11
+
+A privacy-redacted derivative of the canonical v4.2 bundle was published and
+then withdrawn. Every step of it was internally consistent, and the gate
+reported green, while `verify_archive_tracking.py` failed on the tree binding.
+The gate could not see it because the archive proof ran only when git was
+absent. The bytes were restored, and the proof now runs in both modes. The
+reasoning is kept in `REPOSITORY-POLICY.md`.

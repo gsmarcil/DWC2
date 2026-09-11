@@ -46,15 +46,31 @@ and baseline integrity gate passed during import. See
 Therefore the current repository state is:
 
 ```text
-checked-in pre-runtime baseline    VERIFIED / CANONICAL v4.2
-historical clean-room results      RETAINED AS HISTORICAL EVIDENCE
+checked-in pre-runtime baseline       VERIFIED / CANONICAL v4.2
+historical clean-room results         RETAINED AS HISTORICAL EVIDENCE
 current-tree baseline reproducibility ESTABLISHED
-holder campaign readiness             BLOCKED / PRODUCER INCOMPATIBLE
 ```
 
-`./VERIFY-REPOSITORY.sh` currently must preserve
-`REPOSITORY_BASELINE: PASS` while failing the incompatible holder producer. This
-pre-runtime verification does not promote any runtime claim.
+The gate verdict is stated below in the canonical key form so it is compared
+against what `VERIFY-REPOSITORY.sh` actually computes rather than drifting on
+its own:
+
+```text
+REPOSITORY_BASELINE: PASS
+SOURCE_FOUNDATION: PASS
+HOLDER_CAMPAIGN_READINESS: PASS
+REPOSITORY_GATE: PASS
+```
+
+This pre-runtime verification does not promote any runtime claim.
+
+This file previously recorded `holder campaign readiness BLOCKED / PRODUCER
+INCOMPATIBLE` and stated that the gate "must preserve `REPOSITORY_BASELINE:
+PASS` while failing the incompatible holder producer". Both outlived the
+condition that produced them: the compatible producer was imported, G1 closed,
+and the gate went green. The wording here was also in a prose form the
+status-sync guard could not read, which is why it drifted for longer than the
+files the guard covered. It now uses the checked form.
 
 The runtime boundary remains:
 

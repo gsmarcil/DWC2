@@ -50,6 +50,7 @@ DECLARATION_FILES = (
     'docs/CURRENT-CHECKPOINT.md',
     'README.md',
     'STATUS.md',
+    'docs/CONFIRMED.md',
 )
 
 # Deliberately NOT checked: docs/BASELINE-GATE-EXPECTED.md.  It records the

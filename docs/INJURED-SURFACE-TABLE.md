@@ -90,6 +90,14 @@ chipidea into any hypothesis. Different controllers, different descriptor
 models; the only thing compared is whether the driver retires a mapping
 without confirmed hardware quiescence.
 
+That non-import rule governs the sibling-driver sections below, which were added
+after this paragraph was written. Those sections are documentary. They record
+what upstream did in dwc3 and chipidea and what it cost when the invariant was
+violated there, and each carries its own scope limit. None of them supplies a
+premise to the DWC2 hypothesis, and no DWC2 rung moves because of them. Read as
+precedent about the shape of the question, never as inherited hardware
+contract.
+
 Sample size is four. `ENFORCED` for dwc3 and chipidea is established at this
 pin only, on the teardown paths named, and was not audited for every entry
 point into those functions.

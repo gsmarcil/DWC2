@@ -33,6 +33,7 @@ DECLARATION_FILES = (
     Path("docs/CURRENT-CHECKPOINT.md"),
     Path("README.md"),
     Path("STATUS.md"),
+    Path("docs/CONFIRMED.md"),
 )
 
 GREEN = ("PASS", "PASS", "PASS", "PASS")
