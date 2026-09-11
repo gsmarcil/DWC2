@@ -21,7 +21,7 @@ if ! python3 ./abi_check.py > out.txt 2>&1; then
 fi
 tail -1 out.txt | sed 's/^/  /'
 
-if grep -rn '/home/claude' abi_check.py abi_probe.c gen_abi_probe.py; then
+if grep -rEn '/home/[^/[:space:]]+' abi_check.py abi_probe.c gen_abi_probe.py; then
 	echo "FAIL: an absolute path from the author's container survived"
 	exit 1
 fi
