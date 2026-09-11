@@ -69,9 +69,16 @@ not return until the controller reports the endpoint idle.
 ### Reading
 
 Two of four drivers enforce; one attempts; DWC2 attempts on two paths and does
-nothing on a third. `stop-before-unmap` is therefore a **normal expectation of
-the class, not a luxury** — and the DWC2 reset path is the only surveyed path
-in the sample with no stop primitive whatsoever.
+nothing on a third.
+
+Within this surveyed sibling-driver sample, confirmed hardware quiescence
+before request unmap is an **explicitly enforced lifetime rule in DWC3 and
+chipidea**. That is precedent, not a class-wide hardware contract. Four drivers
+do not license a statement about every UDC, and the earlier wording here
+("a normal expectation of the class") claimed more than the sample supports.
+
+The DWC2 reset path remains the only surveyed path with no stop primitive
+whatsoever.
 
 This is a source-level ordering comparison. It does **not** establish that any
 controller performs DMA after unmap, and it does not import dwc3, musb, or
@@ -82,6 +89,83 @@ without confirmed hardware quiescence.
 Sample size is four. `ENFORCED` for dwc3 and chipidea is established at this
 pin only, on the teardown paths named, and was not audited for every entry
 point into those functions.
+
+### Upstream precedent for the DWC3 row
+
+The DWC3 verdict is not read off the source alone. Mainline carries an explicit,
+documented lifetime rule and a documented failure for violating it.
+
+```text
+DWC3 — DWC_usb3x family only; sibling precedent, not a DWC_otg contract
+
+upstream-enforced invariant:
+    if EndTransfer has not completed, defer request unmap.
+
+documented failure when violated:
+    SMMU faults — controller may still be processing the TRB.
+
+delay mechanism origin:
+    e4cf6580ac74  (author 2022-03-09)
+
+promotion to explicit lifetime rule:
+    2b2da6574e77  (author 2022-09-01)
+
+later hardening:
+    76bff31c7fba
+    4db0fbb60136
+    c4e3ef568539
+```
+
+`2b2da6574e77` does not require our inference. Its own message ties incomplete
+EndTransfer directly to continued TRB processing and possible SMMU faults, then
+adds the control-flow consequence that prevents the unmap. It is
+`Reviewed-by: Thinh Nguyen <Thinh.Nguyen@synopsys.com>`, the vendor of the IP.
+
+Scope limit, load-bearing: `e4cf6580ac74` says the delayed-stop condition is
+"applicable to all DWC_usb3x IPs". DWC2 is `DWC_otg`, a different IP family with
+a different descriptor model. That sentence therefore does not reach DWC2 by its
+own terms, and must never be quoted as if it did.
+
+### DWC2 at the pinned ref, restated per path
+
+```text
+ep_disable / ep_dequeue:
+    stop is attempted;
+    timeout is warned;
+    retirement/unmap still continues.
+
+reset / disconnect:
+    no equivalent pre-retirement stop primitive;
+    kill_all_requests()
+      -> complete_request()
+      -> DMA unmap.
+```
+
+The two paths are kept apart deliberately. They fail differently, and merging
+them into one sentence hides that one attempts a stop and the other never does.
+
+A closer reading of `kill_all_requests` sharpens the reset row further. Its only
+register operation is a TX FIFO flush, and that flush is reached **after** every
+queued request has already been completed and unmapped, is guarded by
+`dedicated_fifos`, and acts on the IN direction rather than the OUT path this
+hypothesis concerns. It is therefore not a pre-retirement stop under any
+reading.
+
+Verified at the pinned ref and again on `torvalds/linux` master at the time of
+writing: DWC2 gadget code contains zero occurrences of any delayed-stop flag,
+and its single unmap site is reached without any quiescence check.
+
+### Interpretation
+
+```text
+DWC3 is a sibling-driver precedent for the lifetime invariant,
+not proof that DWC2 hardware obeys the same contract.
+
+DWC2 K_hw remains UNDETERMINED.
+```
+
+Proof of PRIMARY-A in DWC2 continues to rest entirely on its own `K_hw` and
+`R1A`, as it should. Nothing in this section moves the evidence ladder.
 
 ---
 
