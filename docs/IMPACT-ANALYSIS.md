@@ -31,7 +31,9 @@ dwc2_hsotg_ep_disable()                                 :4247
   -> kill_all_requests(..., -ESHUTDOWN)                 :4286
   -> dwc2_hsotg_complete_request()
   -> dwc2_hsotg_unmap_dma()                             :2140
-  -> usb_gadget_unmap_request() -> dma_unmap_{single,sg}()
+  -> usb_gadget_unmap_request()
+  -> [for a DWC2-mapped non-zero request]
+       dma_unmap_{single,sg}()
 ```
 
 Reading notes, because two of these are easy to get wrong:
@@ -58,9 +60,10 @@ guard.
 
 ```text
 SOURCE-PROVEN
-    After an endpoint-stop acknowledgement timeout, Linux DWC2 can
-    terminate the request's DMA mapping without obtaining a positive
-    endpoint-disabled acknowledgement.
+    For a non-zero request whose mapping was established through the
+    gadget DMA mapping path, Linux DWC2 can terminate that mapping after
+    an endpoint-stop acknowledgement timeout without obtaining a
+    positive endpoint-disabled acknowledgement.
 
 NOT licensed by this section
     DMA is definitely still active when unmap occurs.
@@ -78,19 +81,25 @@ host keeps an OUT request active
   -> Linux does not abort teardown
   -> kill_all_requests()
   -> dwc2_hsotg_complete_request()
-  -> dma_unmap_{single,sg}()
-  -> request ownership can be returned or reused
+  -> [for a DWC2-mapped non-zero request]
+       dma_unmap_{single,sg}()
+  -> usb_gadget_giveback_request()
+  -> subsequent buffer reuse/free is possible
   -> ??????????????????????????????????????????
   -> does DWC2 perform any memory transaction using the retired mapping?
 ```
 
-Everything above the question block is SOURCE-PROVEN.
+For a DWC2-mapped non-zero request, the path through
+`usb_gadget_giveback_request()` is SOURCE-PROVEN. Subsequent buffer reuse or
+free is function-driver-dependent and is **possible**, not SOURCE-PROVEN for a
+particular request.
 
 ```text
 CLAIM
-    After failure to obtain endpoint-disable acknowledgement, Linux DWC2
-    may end a request's DMA mapping lifetime while hardware activity
-    associated with that request remains possible.
+    For a request mapped through the gadget DMA path, after failure to
+    obtain endpoint-disable acknowledgement, Linux DWC2 may end that
+    mapping's lifetime while hardware activity associated with the
+    request remains possible.
 
 SUCCESS ARTIFACT
     Same request, same DMA address:
@@ -133,6 +142,18 @@ SWIOTLB
 No victim claim here may be read without naming the backend. Absence of an IOMMU
 fault under non-strict mode is not evidence of safety; it is an untested
 condition.
+
+Cross-object reuse is not required for the first observable victim effect. If
+post-unmap DMA is demonstrated after giveback, the minimum effect is
+post-completion mutation of a buffer the gadget layer already considers
+completed:
+
+```text
+DMA_UNMAP -> GIVEBACK -> late DMA mutates the same buffer
+```
+
+A stronger cross-object corruption claim additionally requires evidence that the
+buffer was freed or recycled to a different owner before the late DMA write.
 
 ## 4. Sub-question triage
 
@@ -215,14 +236,22 @@ attributed it to `CSftRst`, which inverted the conclusion.
 
 Core soft reset is `DOCUMENTED` to return state machines to idle, terminate AHB
 master transactions after the last clean AHB data phase, terminate USB
-transactions immediately, and require `AHBIdle` to be checked afterwards. It is
-therefore a **stronger** quiescence operation than endpoint disable, not a weaker
-one.
+transactions immediately, and require `AHBIdle` to be checked afterwards. The
+register semantics are documented; comparing reset with endpoint disable as a
+quiescence boundary is an analytical inference.
 
 ```text
-Full core reset is a stronger quiescence operation than endpoint disable.
-The Linux teardown path under investigation does not escalate an EPDISBLD
-timeout to core reset before unmapping requests.
+DOCUMENTED
+    Core soft reset returns the relevant state machines toward idle and
+    has explicit AHB transaction-completion semantics.
+
+ANALYTICAL
+    Those semantics make full core reset a stronger candidate quiescence
+    boundary than endpoint disable.
+
+SOURCE-PROVEN
+    The Linux teardown path under investigation does not escalate an
+    EPDISBLD timeout to core reset before unmapping requests.
 ```
 
 This makes the Fuchsia observation more relevant, not less. Fuchsia uses core
@@ -310,9 +339,10 @@ trust the controller" framing built on it does not survive.
    timeout path reach AHBIdle? Same boundary Fuchsia relies on.
 ```
 
-Probes 1 and 2 are the cheapest and the most decisive, and both are single
-observations on the campaign's first target board. Either result is publishable:
-proving a signal insufficient is as useful as proving the race.
+Probes 1 and 2 are cheap mechanism discriminators. Probe 3 is the decisive
+closure test: only a post-unmap transaction or fault tied to the same request and
+retired mapping promotes the hypothesis. Results from probes 1 and 2 may explain
+the mechanism, but do not by themselves close the security claim.
 
 ## 7. Scope limits
 
@@ -324,8 +354,8 @@ usbliter8 and Fuchsia are used strictly within section 5
 ```
 
 The only SOURCE-PROVEN claim this document adds is the ordering in section 1:
-the timeout does not abort the path, and unmap is reached without a positive
-endpoint-disabled acknowledgement.
+for a DWC2-mapped non-zero request, the timeout does not abort the path, and
+unmap is reached without a positive endpoint-disabled acknowledgement.
 
 ## 8. Summary
 
@@ -338,7 +368,8 @@ endpoint-disabled acknowledgement.
 | EPDISBLD without XferCompl implies DMA active | removed |
 | Absence of an XferCompl wait as evidence | downgraded |
 | CSftRst quoted as a DMA precondition | corrected, belongs to RxFFlsh |
-| Core reset as stronger quiescence | DOCUMENTED |
+| Core reset semantics | DOCUMENTED |
+| Core reset as stronger quiescence boundary | ANALYTICAL |
 | AHBIdle equals quiescence | UNKNOWN |
 | Fuchsia as invariant corroboration | EXTERNAL, bounded |
 | usbliter8 as consequence analogue | EXTERNAL, bounded |
