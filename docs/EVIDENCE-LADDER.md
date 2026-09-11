@@ -1,5 +1,80 @@
 # Evidence ladder
 
+## The claim in one page
+
+The invariant under examination is an ordering one. On endpoint close or
+teardown the required sequence is:
+
+```text
+stop the endpoint / DMA
+        ↓
+confirm the hardware actually stopped
+        ↓
+unmap the buffer
+        ↓
+release the memory
+```
+
+The hypothesis is that Linux DWC2 can reach this instead:
+
+```text
+attempt to stop the endpoint
+        ↓
+stop unconfirmed / timeout, warned and not acted on
+        ↓
+usb_gadget_unmap_request_by_dev()
+        ↓
+while DWC2 hardware may still be capable of DMA
+```
+
+If that happens, the controller may write to a DMA address after the mapping
+has expired. What follows depends on the IOMMU configuration and on how the
+memory is reused: an IOMMU fault, DMA into reallocated memory, corruption, or a
+crash. Those are consequences, not the claim.
+
+### State the invariant, not the code ordering
+
+The problem is not `unmap` itself. Calling it is correct and required; the DMA
+API mandates it.
+
+The problem is the possibility that **the mapping's lifetime is shorter than the
+hardware's activity lifetime**. Every artifact in this repository exists to
+decide that one question, and framing it this way is what keeps the work honest:
+it names a property that hardware either has or does not have, rather than a
+line of code someone might argue about.
+
+### The gate
+
+```text
+CLAIM
+    Linux DWC2 may unmap a request before that request's DMA is
+    guaranteed stopped.
+
+SUCCESS ARTIFACT
+    The same request shows:
+        STOP_TIMEOUT
+        -> UNMAP_DONE
+        -> a later DMA or fault to the same IOVA
+
+STOP CONDITION
+    Proof that the hardware always becomes quiescent before UNMAP_DONE.
+```
+
+Both outcomes are results. The stop condition closing the claim is as valuable
+as the success artifact opening it, and cheaper to reach.
+
+### Where this stands
+
+```text
+source ordering                 SOURCE-PROVEN
+Linux runtime demonstration     NOT ESTABLISHED
+```
+
+Nothing in the sibling-driver material changes the second line. DWC3 carries an
+enforced version of this invariant and a documented failure for violating it,
+and that is precedent about the shape of the question, not an answer to it for
+DWC2.
+
 ## PRIMARY-A / R1A — teardown without confirmed quiescence
 
 R1A is deliberately defined in terms of observable controller/software state. It does **not** claim that a hidden hardware-ownership bit exists.
