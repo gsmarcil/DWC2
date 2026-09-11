@@ -141,3 +141,69 @@ that arguably should have gated it. That likely needs a dedicated rule or a
 manual per-driver audit.
 
 Listed as proposed future work, not as a gap in current evidence.
+
+## Negative evidence: no mainline commit addresses DWC2 stop-before-unmap
+
+Scope of the search, stated so the claim can be judged and repeated:
+
+```text
+searched      full torvalds/linux history, commit SUBJECTS, via git log --grep
+at            08df884136f1c1197bab2a27814404fd329d9aac
+not searched  LKML / lore.kernel.org — unreachable from the verifying
+              environment (egress blocked). The negative claim below covers
+              merged mainline only.
+```
+
+No mainline commit was found that addresses a quiescence check before request
+unmap on a DWC2 teardown path. Every DWC2 commit touching unmap falls into one
+of four categories, none of which is this question:
+
+```text
+75a41ce46bae  2021-05-06  unmap direction on Control OUT status phase
+44583fecfd85  2015-09-29  ordering of unmap vs unaligned-buffer completion
+5dce95554a18  2014-09-16  host-side URB bounce-buffer unmapping (not gadget)
+(reported)    2026-08-26  PIO RX out-of-bounds write — different failure mode
+```
+
+The fourth is listed because a reviewer will find it; it is a host-path change
+using `usb_hcd_unmap_urb_for_dma()`, not a gadget teardown change.
+
+The only mainline commit that explicitly ties an incomplete stop to unmap and
+to resulting faults is `2b2da6574e77`, and it is DWC3-only. It does not mention
+DWC2.
+
+What this does and does not establish:
+
+```text
+establishes   the question this repository asks has not been answered for
+              DWC2 in merged mainline
+does NOT      establish that the answer is "safe", or that no one has
+              encountered it outside mainline
+```
+
+Absence of a fix is not evidence of absence of a defect, and it is equally not
+evidence of one. It is recorded so the novelty of the question is documented
+rather than assumed, and so a reviewer can repeat the search.
+
+## Unverified lead: Fuchsia DWC2 workaround
+
+Reported to this repository: a Fuchsia OS commit (given as 2025-10-02,
+"Deliberately leak pinned endpoint memory") said to state that the proper fix
+would be to ensure DMA is fully stopped before unpinning memory, but that
+stopping individual DWC2 endpoints is "only reluctantly supported", so memory is
+leaked deliberately instead.
+
+```text
+status   UNVERIFIED from this environment
+reason   fuchsia.googlesource.com is blocked by the egress proxy, and web
+         search returned no corroboration for the quoted phrases
+```
+
+If confirmed it would be a useful external corroboration of one premise: that
+DWC2 endpoint stop is not a reliable operation, and that an engineer who looked
+at the problem preferred leaking memory to unmapping without a guaranteed stop.
+It would still not show that Linux DWC2 has the defect, and Fuchsia does not use
+the Linux DMA API.
+
+It carries no weight until someone reads the commit at the Fuchsia source
+directly. Recorded as a lead so it is re-checked rather than repeated as fact.
