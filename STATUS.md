@@ -33,6 +33,7 @@ holder_contract_selftest           PASS   2 positive, 10 fail-closed
 holder_log_guard_selftest          PASS   15/15
 holder_roundtrip                   PASS   18/18
 REPOSITORY_BASELINE                PASS
+SOURCE_FOUNDATION                  PASS
 HOLDER_CAMPAIGN_READINESS          PASS
 REPOSITORY_GATE                    PASS
 ```

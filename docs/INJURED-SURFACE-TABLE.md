@@ -6,9 +6,13 @@ stop-before-unmap a DWC2 anomaly or a class-wide pattern?**
 ## Pin
 
 ```text
-repository   torvalds/linux
-ref          f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+repository        torvalds/linux
+pinned ref        f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+re-checked at     08df884136f1c1197bab2a27814404fd329d9aac
 ```
+
+Both are commit hashes rather than dates or "current master", so every claim in
+this file can be re-verified at exactly the trees it was made against.
 
 | File | SHA256 at ref |
 |---|---|
@@ -69,9 +73,16 @@ not return until the controller reports the endpoint idle.
 ### Reading
 
 Two of four drivers enforce; one attempts; DWC2 attempts on two paths and does
-nothing on a third. `stop-before-unmap` is therefore a **normal expectation of
-the class, not a luxury** — and the DWC2 reset path is the only surveyed path
-in the sample with no stop primitive whatsoever.
+nothing on a third.
+
+Within this surveyed sibling-driver sample, confirmed hardware quiescence
+before request unmap is an **explicitly enforced lifetime rule in DWC3 and
+chipidea**. That is precedent, not a class-wide hardware contract. Four drivers
+do not license a statement about every UDC, and the earlier wording here
+("a normal expectation of the class") claimed more than the sample supports.
+
+The DWC2 reset path remains the only surveyed path with no stop primitive
+whatsoever.
 
 This is a source-level ordering comparison. It does **not** establish that any
 controller performs DMA after unmap, and it does not import dwc3, musb, or
@@ -82,6 +93,155 @@ without confirmed hardware quiescence.
 Sample size is four. `ENFORCED` for dwc3 and chipidea is established at this
 pin only, on the teardown paths named, and was not audited for every entry
 point into those functions.
+
+### Upstream precedent for the DWC3 row
+
+The DWC3 verdict is not read off the source alone. Mainline carries an explicit,
+documented lifetime rule and a documented failure for violating it.
+
+```text
+DWC3 — DWC_usb3x family only; sibling precedent, not a DWC_otg contract
+
+upstream-enforced invariant:
+    if EndTransfer has not completed, defer request unmap.
+
+documented failure when violated:
+    SMMU faults — controller may still be processing the TRB.
+
+delay mechanism origin:
+    e4cf6580ac74  (author 2022-03-09)
+
+promotion to explicit lifetime rule:
+    2b2da6574e77  (author 2022-09-01)
+
+later hardening:
+    76bff31c7fba
+    4db0fbb60136
+    c4e3ef568539
+```
+
+`2b2da6574e77` does not require our inference. Its own message ties incomplete
+EndTransfer directly to continued TRB processing and possible SMMU faults, then
+adds the control-flow consequence that prevents the unmap. It is
+`Reviewed-by: Thinh Nguyen <Thinh.Nguyen@synopsys.com>`, providing direct
+Synopsys-side review of that lifetime rule.
+
+Scope limit, load-bearing: `e4cf6580ac74` says the delayed-stop condition is
+"applicable to all DWC_usb3x IPs". DWC2 is `DWC_otg`, a different IP family with
+a different descriptor model. That sentence therefore does not reach DWC2 by its
+own terms, and must never be quoted as if it did.
+
+### DWC2 at the pinned ref, restated per path
+
+```text
+ep_disable / ep_dequeue:
+    stop is attempted;
+    timeout is warned;
+    retirement/unmap still continues.
+
+reset / disconnect:
+    no equivalent pre-retirement stop primitive;
+    kill_all_requests()
+      -> complete_request()
+      -> DMA unmap.
+```
+
+The two paths are kept apart deliberately. They fail differently, and merging
+them into one sentence hides that one attempts a stop and the other never does.
+
+A closer reading of `kill_all_requests` sharpens the reset row further. Its only
+register operation is a TX FIFO flush, and that flush is reached **after** every
+queued request has already been completed and unmapped, is guarded by
+`dedicated_fifos`, and acts on the IN direction rather than the OUT path this
+hypothesis concerns. It is therefore not a pre-retirement stop under any
+reading.
+
+Verified at the pinned ref and again on `torvalds/linux` master at
+`08df884136f1c1197bab2a27814404fd329d9aac`: no equivalent fail-closed
+delayed-unmap gate was identified in the audited DWC2 teardown paths. In particular, the
+reset/disconnect path reaches the single DMA-unmap site without a
+preceding endpoint-stop/quiescence check.
+
+The distinction matters and an earlier draft of this section lost it. Saying
+the unmap site is reached "without any quiescence check" contradicts the
+per-path split stated above: `ep_disable` and `ep_dequeue` do attempt a stop
+and warn on timeout. Only the reset/disconnect path reaches retirement with no
+preceding stop at all.
+
+### Sibling precedent with a CVE: chipidea `_ep_nuke()`
+
+```text
+status        MERGED IN MAINLINE + CVE ASSIGNED
+commit        cea2a1257a3b  (2026-01-08)
+subject       usb: chipidea: udc: fix DMA and SG cleanup in _ep_nuke()
+cve           CVE-2026-43250, CVSS 7.8
+```
+
+CVE-2026-43250 documents the same asymmetry in chipidea that this table
+hypothesizes for DWC2: an exceptional teardown path returns requests without
+mirroring the unmap/cleanup sequence of the normal completion path.
+`_ep_nuke()` returned requests to the gadget layer without unmapping DMA
+buffers or cleaning up scatter-gather bounce buffers, while
+`_hardware_dequeue()` calls `usb_gadget_unmap_request_by_dev()` and the bounce
+cleanup. On disconnect during a multi-segment transfer, `num_mapped_sgs` and
+`sgt.sgl` stayed stale and the request was given back with `-ESHUTDOWN` while
+DMA state was still live.
+
+Two limits are load-bearing:
+
+- chipidea is a sibling driver, not DWC2. Nothing here transfers by adjacency.
+- The chipidea manifestation is stale DMA state on request reuse, not an
+  in-flight DMA write racing an unmap. The DWC2 hypothesis concerns the latter.
+  The shared structure is the missing cleanup mirror, not the failure mode.
+
+Recorded because it shows the *shape* of the hypothesis is a known bug class in
+USB gadget drivers rather than a speculative construct. It is not evidence that
+DWC2 has the same defect.
+
+### Reported but unmerged: tegra-xudc drain-before-unmap
+
+```text
+status        NOT MERGED IN MAINLINE
+identifier    EP_THREAD_ACTIVE exists in drivers/usb/gadget/udc/tegra-xudc.c
+              at 08df884136f1c1197bab2a27814404fd329d9aac
+merged fix    none found by subject search across full mainline history
+claim source  reported to this repository as an LKML posting; the LKML archive
+              could not be reached from the environment used to verify, so the
+              posting itself is UNVERIFIED here
+```
+
+The reported content is an observed SMMU translation fault (`fsr=0x402`) on
+Tegra234 under strict SMMU mode, caused by `dma_unmap()` invalidating the IOVA
+while an AXI write dispatched by the controller was still in flight, wedging the
+endpoint. The reported fix polls `EP_THREAD_ACTIVE` before unmapping and skips
+the unmap on timeout.
+
+What is verified here is narrow and stated as such: the identifier the reported
+fix polls does exist in that driver, and no fix with that subject is in
+mainline. The empirical fault report itself is not confirmed from primary
+sources in this environment.
+
+This entry therefore carries **no evidentiary weight** for PRIMARY-A. It is
+recorded so the lead is not silently dropped and so the next person re-checks it
+against the LKML archive directly rather than trusting this file. If confirmed,
+it would matter a great deal, because it would be a runtime observation of the
+mechanism rather than a source-level inference. Until then it is a lead.
+
+Scope limit if it is ever confirmed: tegra-xudc is a different IP, and the
+reported behaviour depends on a controller that signals completion before the
+store commits. DWC2 has not been shown to do that.
+
+### Interpretation
+
+```text
+DWC3 is a sibling-driver precedent for the lifetime invariant,
+not proof that DWC2 hardware obeys the same contract.
+
+DWC2 K_hw remains UNDETERMINED.
+```
+
+Proof of PRIMARY-A in DWC2 continues to rest entirely on its own `K_hw` and
+`R1A`, as it should. Nothing in this section moves the evidence ladder.
 
 ---
 

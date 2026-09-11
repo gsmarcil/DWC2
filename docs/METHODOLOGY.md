@@ -52,3 +52,32 @@ Hardware procurement follows the same closure discipline as claim promotion. A b
 Before any new hardware purchase, the campaign must name the live blocker, define the decisive artifact the hardware can produce, exhaust cheaper equivalent paths, and define the first stop condition. Already-acquired hardware is tested for all inexpensive decisive artifacts before another board is authorized.
 
 The canonical procurement rule, experiment dependency graph, current board order, and budget ledger are maintained in [`HARDWARE-ACQUISITION-GATE.md`](HARDWARE-ACQUISITION-GATE.md).
+
+## The rule being examined
+
+The DMA API documentation states the invariant directly. Quoted from
+`Documentation/core-api/dma-api-howto.rst` at
+`08df884136f1c1197bab2a27814404fd329d9aac`:
+
+```text
+line 715   After the last DMA transfer call one of the DMA unmap routines
+           dma_unmap_{single,sg}().
+
+line 675   Every dma_map_{single,sg}() call should have its
+           dma_unmap_{single,sg}() counterpart, because the DMA address space
+           is a shared resource and you could render the machine unusable by
+           consuming all DMA addresses.
+```
+
+Both were read out of the tree rather than quoted from memory, and the line
+numbers are given so a reviewer can re-check them at that exact commit.
+
+The question this repository investigates is narrower than "is the rule
+violated". The source-level sequence in DWC2 is already established: on the
+stop-timeout path the driver proceeds to unmap and giveback after warning that
+the hardware did not acknowledge the stop. What is **not** established is
+whether "the last DMA transfer" has actually occurred at that point on real
+DWC2 hardware.
+
+That distinction is the whole hypothesis. It is a hardware-behaviour question,
+not a source-rule question, and it is why no amount of source reading closes it.

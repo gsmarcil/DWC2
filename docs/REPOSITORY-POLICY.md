@@ -66,19 +66,47 @@ Because this repository is private, evidence that materially supports a survivin
 Do not preserve failed hypotheses as current facts. If a superseded result matters to explain why a guard exists, record it in the audit history with an explicit `SUPERSEDED` label.
 
 
-## Privacy-redacted imported evidence
+## Privacy redaction of imported evidence: withdrawn
 
-The no-baseline-edit rule remains the default. A checked-in imported evidence
-bundle may be replaced only by a controlled privacy-redacted derivative when an
-environment-local identifier would otherwise be published. Such a transaction
-must be mechanical and non-semantic: preserve the source archive SHA256, record
-the replacement token and exact file/occurrence counts, regenerate every affected
-nested and top-level manifest plus the transport archive, prove the redacted
-archive reproduces the checked-in baseline byte-for-byte after extraction, and
-run both baseline and repository gates. The redaction itself promotes no evidence.
+A privacy-redacted derivative of the canonical v4.2 bundle was published and
+then withdrawn. It is recorded here because the reasoning matters more than the
+outcome.
 
-The current v4.2 publication derivative is documented by
-`artifacts/canonical-v4.2/PRIVACY-REDACTION-RECEIPT.txt`.
+The redaction replaced an environment-local path inside pinned evidence, then
+regenerated every affected manifest and the transport archive so that all of
+them agreed with the new bytes. Each of those steps was internally consistent,
+and both the baseline check and the repository gate reported green afterwards.
+
+What it could not regenerate is the binding in `verify_archive_tracking.py`.
+Those constants tie `baseline/` to an authenticated source commit and tree OID.
+Rewriting the bytes changed the tree, so the archive-native proof failed:
+
+```text
+baseline Git tree mismatch:
+  4e1f21d99f813c0c6e34f5ff269d704996644a41
+!= 223dd3983955393a9cadcbbf525767ce9a49f459
+```
+
+That constant cannot honestly be updated to the new value. It would then assert
+only that the tree is whatever the tree currently is, which proves nothing. The
+redacted bytes did not come from the authenticated archive, and no manifest
+regeneration can make them have done so.
+
+The failure was also **silent to the gate**. In a git checkout the gate proves
+tracking with `git ls-files` and never runs the archive proof, so it stayed
+green while the proof a reviewer would run on a tarball was failing. Green here
+did not mean intact.
+
+The redacted content was an operating-system username in build logs. No email
+address, IP, credential or personal datum was present. That is ordinary build
+provenance, and trading an authenticated archive for its removal was a bad
+exchange: a self-verifying archive carrying an unremarkable username is strong,
+and a clean-looking archive that fails its own proof is worthless.
+
+The default is therefore restored without exception: do not edit files under
+`baseline/`, and do not regenerate manifests to make edited bytes pass. If
+identifiers must change, rebuild the evidence at its source and import a new
+authenticated archive with its own constants.
 
 ## History
 

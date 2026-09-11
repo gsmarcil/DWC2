@@ -1,7 +1,18 @@
-# Repository completeness gate — expected current result
+# Repository completeness gate — superseded red-state specification
+
+**This file no longer describes the current gate.** It specified the expected
+output while the compatible holder producer was still missing. That condition
+is closed: the canonical producer is imported and the gate exits 0. For the
+live verdict see `GATE-STATE.md`, which is machine-checked against what
+`VERIFY-REPOSITORY.sh` actually computes.
+
+The block below is retained as the historical acceptance criterion for the red
+state, and as the specification the checker was written against. It is kept out
+of the machine-checked declaration set deliberately, because it is a record of a
+past expectation rather than a claim about today.
 
 With the canonical v4.2 baseline intact but the compatible holder producer
-missing, `./VERIFY-REPOSITORY.sh` must exit 1 and report:
+missing, `./VERIFY-REPOSITORY.sh` was required to exit 1 and report:
 
 ```text
 baseline_manifest_present          PASS
