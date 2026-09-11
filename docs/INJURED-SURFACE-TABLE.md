@@ -6,9 +6,13 @@ stop-before-unmap a DWC2 anomaly or a class-wide pattern?**
 ## Pin
 
 ```text
-repository   torvalds/linux
-ref          f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+repository        torvalds/linux
+pinned ref        f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8
+re-checked at     08df884136f1c1197bab2a27814404fd329d9aac
 ```
+
+Both are commit hashes rather than dates or "current master", so every claim in
+this file can be re-verified at exactly the trees it was made against.
 
 | File | SHA256 at ref |
 |---|---|
@@ -152,9 +156,9 @@ queued request has already been completed and unmapped, is guarded by
 hypothesis concerns. It is therefore not a pre-retirement stop under any
 reading.
 
-Verified at the pinned ref and again on `torvalds/linux` master at the
-time of writing: no equivalent fail-closed delayed-unmap gate was
-identified in the audited DWC2 teardown paths. In particular, the
+Verified at the pinned ref and again on `torvalds/linux` master at
+`08df884136f1c1197bab2a27814404fd329d9aac`: no equivalent fail-closed
+delayed-unmap gate was identified in the audited DWC2 teardown paths. In particular, the
 reset/disconnect path reaches the single DMA-unmap site without a
 preceding endpoint-stop/quiescence check.
 

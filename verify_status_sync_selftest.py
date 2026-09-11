@@ -26,9 +26,13 @@ LEGACY_PRODUCER = Path("r1a-device/legacy/r1a_ffs_out_v2.c.pre-holder")
 LEGACY_SHA256 = ("83ea60d3566617eefc0a1b488c2916c0482781b57156d4f0d"
                  "6116958f126118e")
 
+# Mirrors verify_status_sync.DECLARATION_FILES.  If that list grows, this one
+# must grow with it, or the fixture stops representing a truthful tree.
 DECLARATION_FILES = (
     Path("docs/GATE-STATE.md"),
     Path("docs/CURRENT-CHECKPOINT.md"),
+    Path("README.md"),
+    Path("STATUS.md"),
 )
 
 GREEN = ("PASS", "PASS", "PASS", "PASS")
@@ -80,21 +84,35 @@ def fixture(stack: tempfile.TemporaryDirectory) -> Path:
     (root / "docs").mkdir(parents=True)
     (root / CANONICAL_PRODUCER.parent).mkdir(parents=True)
     (root / LEGACY_PRODUCER.parent).mkdir(parents=True)
+    for rel in DECLARATION_FILES:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
 
     shutil.copy2(ROOT / CANONICAL_PRODUCER, root / CANONICAL_PRODUCER)
     shutil.copy2(ROOT / LEGACY_PRODUCER, root / LEGACY_PRODUCER)
 
+    colon = (
+        "# fixture\n\n"
+        "```text\n"
+        "REPOSITORY_BASELINE: PASS\n"
+        "SOURCE_FOUNDATION: PASS\n"
+        "HOLDER_CAMPAIGN_READINESS: PASS\n"
+        "REPOSITORY_GATE: PASS\n"
+        "```\n"
+    )
+    # Whitespace-aligned, the way STATUS.md states them.  Covering only the
+    # colon form would leave that file silently unchecked.
+    aligned = (
+        "# fixture\n\n"
+        "```text\n"
+        "REPOSITORY_BASELINE                PASS\n"
+        "SOURCE_FOUNDATION                  PASS\n"
+        "HOLDER_CAMPAIGN_READINESS          PASS\n"
+        "REPOSITORY_GATE                    PASS\n"
+        "```\n"
+    )
     for rel in DECLARATION_FILES:
-        (root / rel).write_text(
-            "# fixture\n\n"
-            "```text\n"
-            "REPOSITORY_BASELINE: PASS\n"
-            "SOURCE_FOUNDATION: PASS\n"
-            "HOLDER_CAMPAIGN_READINESS: PASS\n"
-            "REPOSITORY_GATE: PASS\n"
-            "```\n",
-            encoding="utf-8",
-        )
+        text = aligned if rel.name == "STATUS.md" else colon
+        (root / rel).write_text(text, encoding="utf-8")
     return root
 
 

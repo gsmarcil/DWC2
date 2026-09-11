@@ -48,7 +48,14 @@ from pathlib import Path
 DECLARATION_FILES = (
     'docs/GATE-STATE.md',
     'docs/CURRENT-CHECKPOINT.md',
+    'README.md',
+    'STATUS.md',
 )
+
+# Deliberately NOT checked: docs/BASELINE-GATE-EXPECTED.md.  It records the
+# acceptance criterion for the superseded red state and is marked as such in
+# its own heading.  It is a record of a past expectation, not a claim about the
+# current gate, so holding it to today's verdict would be wrong.
 
 # Keys every declaration file must state, exactly once, and correctly.
 REQUIRED_KEYS = (
@@ -93,7 +100,9 @@ def sha256(path: Path) -> str:
 def declared_values(text: str, key: str) -> list[str]:
     """Every declaration of ``key`` in ``text``, as stated values."""
     found = []
-    pattern = re.compile(r'^\s*' + re.escape(key) + r'\s*:\s*(\S.*?)\s*$')
+    pattern = re.compile(
+        r'^\s*' + re.escape(key) + r'\s*(?::\s*|\s+)(\S.*?)\s*$'
+    )
     for line in text.splitlines():
         m = pattern.match(line)
         if m:
