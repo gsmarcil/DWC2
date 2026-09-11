@@ -168,6 +168,69 @@ per-path split stated above: `ep_disable` and `ep_dequeue` do attempt a stop
 and warn on timeout. Only the reset/disconnect path reaches retirement with no
 preceding stop at all.
 
+### Sibling precedent with a CVE: chipidea `_ep_nuke()`
+
+```text
+status        MERGED IN MAINLINE + CVE ASSIGNED
+commit        cea2a1257a3b  (2026-01-08)
+subject       usb: chipidea: udc: fix DMA and SG cleanup in _ep_nuke()
+cve           CVE-2026-43250, CVSS 7.8
+```
+
+CVE-2026-43250 documents the same asymmetry in chipidea that this table
+hypothesizes for DWC2: an exceptional teardown path returns requests without
+mirroring the unmap/cleanup sequence of the normal completion path.
+`_ep_nuke()` returned requests to the gadget layer without unmapping DMA
+buffers or cleaning up scatter-gather bounce buffers, while
+`_hardware_dequeue()` calls `usb_gadget_unmap_request_by_dev()` and the bounce
+cleanup. On disconnect during a multi-segment transfer, `num_mapped_sgs` and
+`sgt.sgl` stayed stale and the request was given back with `-ESHUTDOWN` while
+DMA state was still live.
+
+Two limits are load-bearing:
+
+- chipidea is a sibling driver, not DWC2. Nothing here transfers by adjacency.
+- The chipidea manifestation is stale DMA state on request reuse, not an
+  in-flight DMA write racing an unmap. The DWC2 hypothesis concerns the latter.
+  The shared structure is the missing cleanup mirror, not the failure mode.
+
+Recorded because it shows the *shape* of the hypothesis is a known bug class in
+USB gadget drivers rather than a speculative construct. It is not evidence that
+DWC2 has the same defect.
+
+### Reported but unmerged: tegra-xudc drain-before-unmap
+
+```text
+status        NOT MERGED IN MAINLINE
+identifier    EP_THREAD_ACTIVE exists in drivers/usb/gadget/udc/tegra-xudc.c
+              at 08df884136f1c1197bab2a27814404fd329d9aac
+merged fix    none found by subject search across full mainline history
+claim source  reported to this repository as an LKML posting; the LKML archive
+              could not be reached from the environment used to verify, so the
+              posting itself is UNVERIFIED here
+```
+
+The reported content is an observed SMMU translation fault (`fsr=0x402`) on
+Tegra234 under strict SMMU mode, caused by `dma_unmap()` invalidating the IOVA
+while an AXI write dispatched by the controller was still in flight, wedging the
+endpoint. The reported fix polls `EP_THREAD_ACTIVE` before unmapping and skips
+the unmap on timeout.
+
+What is verified here is narrow and stated as such: the identifier the reported
+fix polls does exist in that driver, and no fix with that subject is in
+mainline. The empirical fault report itself is not confirmed from primary
+sources in this environment.
+
+This entry therefore carries **no evidentiary weight** for PRIMARY-A. It is
+recorded so the lead is not silently dropped and so the next person re-checks it
+against the LKML archive directly rather than trusting this file. If confirmed,
+it would matter a great deal, because it would be a runtime observation of the
+mechanism rather than a source-level inference. Until then it is a lead.
+
+Scope limit if it is ever confirmed: tegra-xudc is a different IP, and the
+reported behaviour depends on a controller that signals completion before the
+store commits. DWC2 has not been shown to do that.
+
 ### Interpretation
 
 ```text

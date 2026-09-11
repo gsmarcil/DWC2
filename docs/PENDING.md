@@ -103,3 +103,41 @@ Only after R3, evaluate:
 - attacker position, privileges, interaction and deployment prerequisites.
 
 Do not assign High/Critical solely from R1A or an IOMMU fault.
+
+## Test-condition note: IOMMU mode
+
+Any DWC2 runtime test must record the IOMMU mode in effect.
+
+Under strict IOMMU/SMMU mode an unmap invalidates the IOVA synchronously, which
+is what would let an in-flight write fault visibly. Under non-strict mode the
+invalidation is deferred and the same race need not surface as a fault at all.
+
+Therefore: absence of an IOMMU fault under non-strict mode is **not** evidence
+of safety. It is an untested condition. A test plan must either pin strict mode
+or state explicitly that the race window was not probed.
+
+This matters concretely for the planned target. Pi Zero 2W has no IOMMU on the
+USB path, so the fault-based witness that would make `D_issue` cheap to observe
+is unavailable there. That is a property of the target, not of the hypothesis,
+and it is why `P3` requires an independent artifact chain rather than a fault
+log.
+
+## P6 (proposed): static-analysis pattern for map/unmap asymmetry
+
+No existing Coccinelle or Smatch pattern was found that flags a `dma_unmap`
+reached without a preceding quiescence check on the same path.
+
+A naive SmPL rule of the form:
+
+```text
+dma_map...(...);
+... when != dma_unmap...(...)
+giveback(...);
+```
+
+would not capture the interesting cases, because the unmap *is* called. The
+interesting pattern is path-sensitive: an unmap reached after a timeout warning
+that arguably should have gated it. That likely needs a dedicated rule or a
+manual per-driver audit.
+
+Listed as proposed future work, not as a gap in current evidence.

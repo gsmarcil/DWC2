@@ -78,3 +78,33 @@ It is **not required for R1A runtime** under the frozen R1 predicate. This is no
 - An IOMMU fault is **not** evidence of `D_commit`.
 - `D_commit` requires a memory-side completed-effect observation or equivalent.
 - Security severity requires a concrete security boundary/ownership impact and attacker preconditions.
+
+## Related but distinct, recorded so they are not conflated
+
+```text
+CVE-2026-64337 / mtu3     commit 0bddda5a1166 (2026-06-23)
+                          usb: mtu3: unmap request DMA on queue failure
+```
+
+An unmapped-DMA leak on the **queue error path**, not a teardown-path
+asymmetry. Noted only to show that map/unmap asymmetry is not confined to
+shutdown paths. It does not bear on the DWC2 teardown hypothesis.
+
+```text
+musb (historical)         commit 06d9db7273c7 (2013-03-15)
+                          usb: musb: gadget: do *unmap_dma_buffer* only for
+                          valid DMA addr
+```
+
+Unmapping DMA unconditionally in a shared giveback path caused an OOPS on ep0,
+which has no DMA buffer. Historical only: it shows giveback-path unmap handling
+has been fragile in this subsystem for over a decade. It is not evidence that
+DWC2 has the same bug.
+
+```text
+CVE-2026-68370 / dummy_hcd   commit d5e5cd3654d2 (2026-07-16)  OUT OF SCOPE
+```
+
+Concurrent reuse of a shared `usb_request` during giveback. It involves no
+`dma_unmap` and no mapping lifetime at all, so it is not the same bug class and
+is excluded deliberately rather than overlooked.
