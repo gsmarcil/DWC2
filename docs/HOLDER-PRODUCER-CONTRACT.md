@@ -35,10 +35,11 @@ and fail-closed controls are compatible with the frozen evidence pipeline.
 | `boot_id` | required | present / kernel-derived |
 | `device_seq` | required | present / monotonic |
 
-The preserved pre-holder source has SHA256:
+The preserved pre-holder source is:
 
 ```text
-83ea60d3566617eefc0a1b488c2916c0482781b57156d4f0d6116958f126118e
+r1a-device/legacy/r1a_ffs_out_v2.c.pre-holder
+SHA256 83ea60d3566617eefc0a1b488c2916c0482781b57156d4f0d6116958f126118e
 ```
 
 It remains intentionally incompatible and is checked as such. The canonical
