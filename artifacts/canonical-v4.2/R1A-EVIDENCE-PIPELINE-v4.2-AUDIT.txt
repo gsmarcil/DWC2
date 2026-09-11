@@ -1,19 +1,12 @@
 R1A-EVIDENCE-PIPELINE v4.2 — provenance/freeze audit
 
 archive
-  sha256  fbe578b28649fda589fa630495e84a855e4a8149eb921ca087c48d42cdd76ce4
+  sha256  d1d754076039aedf9756883f972a4f77014c043a6b7c1e0e14b3ebaae01eb563
   size    303278 bytes
-  deterministic privacy-redacted repack: BYTE_IDENTICAL_PASS
+  deterministic repack: BYTE_IDENTICAL_PASS
   hidden .git: absent
   built r1a_host binary: absent
   nested component SHA256SUMS pinned by top-level SHA256SUMS: yes
-
-privacy publication derivative
-  source archive sha256 d1d754076039aedf9756883f972a4f77014c043a6b7c1e0e14b3ebaae01eb563
-  publication archive sha256 fbe578b28649fda589fa630495e84a855e4a8149eb921ca087c48d42cdd76ce4
-  14 environment-local home-prefix occurrences redacted across 10 files
-  replacement token <WORKSPACE_HOME>
-  semantic evidence promotion NONE
 
 new v4.2 closure
   validator EPOCH_ARTIFACTS is the artifact-key authority

@@ -58,12 +58,40 @@ else
         if [ -f verify_archive_tracking.py ] && python3 verify_archive_tracking.py "$ROOT" >"$archive_tmp" 2>&1; then
             pass baseline_pins_tracked
             pass baseline_pins_not_ignored
-            pass archive_tracking_proof
         else
             failmsg git_tracking_check_available
             [ -s "$archive_tmp" ] && sed 's/^/  /' "$archive_tmp" >&2
         fi
         rm -f "$archive_tmp"
+    fi
+
+    # 1b. Archive-native provenance proof, run in BOTH modes.
+    #
+    # This previously ran only when git was absent. In a git checkout the gate
+    # proved tracking with `git ls-files` and never evaluated the binding
+    # between baseline/ and its authenticated source tree, so the gate could
+    # report green while the proof a reviewer runs on a tarball was failing.
+    # That is exactly what happened when a redaction rewrote pinned bytes:
+    # every manifest was regenerated to agree with the new bytes, the gate
+    # stayed green, and only the archive proof caught the broken binding.
+    #
+    # The constants it checks cannot be regenerated honestly. They tie the
+    # tree to an authenticated import, so updating them to match edited bytes
+    # would assert only that the tree is whatever it currently is.
+    if [ -f verify_archive_tracking.py ]; then
+        proof_tmp=${TMPDIR:-/tmp}/dwc2-archive-proof.$$
+        if python3 verify_archive_tracking.py "$ROOT" >"$proof_tmp" 2>&1; then
+            pass archive_tracking_proof
+        else
+            failmsg archive_tracking_proof
+            sed 's/^/  /' "$proof_tmp" >&2
+            baseline_fail=1
+        fi
+        rm -f "$proof_tmp"
+    else
+        failmsg archive_tracking_proof
+        printf '  missing: verify_archive_tracking.py\n' >&2
+        baseline_fail=1
     fi
 fi
 
