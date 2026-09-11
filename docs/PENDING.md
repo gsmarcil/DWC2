@@ -234,18 +234,30 @@ _reluctantly_ supported". The chosen remedy is to leak the pinned memory to a
 
 ```text
 corroborates   an engineer working on DWC2 independently identified the same
-               invariant: memory must not be released while the controller may
-               still be using it
+               invariant: the lifetime of memory the hardware may still be
+               using must not be ended before DMA is proven stopped.
 
-corroborates   that reliably stopping a DWC2 endpoint was judged hard enough
-               that quarantining memory was preferred to reclaiming it
+corroborates   that stopping an individual DWC2 endpoint is involved enough
+               that another implementation preferred holding memory in
+               quarantine over reclaiming it before quiescence was proven.
 
-does NOT       show that Linux DWC2 has the defect. Fuchsia is a different
-               driver, a different codebase, and does not use the Linux DMA API.
-               Pin/unpin is not dma_map/dma_unmap.
+does NOT       establish that Linux DWC2 carries the defect under study.
+
+reason         different driver, different codebase, different teardown path,
+               and Fuchsia pin/unpin is not the semantic equivalent of the
+               Linux dma_map/dma_unmap path.
+
+therefore      the reference strengthens the safety invariant only.
+               It establishes neither reachability, nor ordering, nor
+               post-unmap DMA in Linux.
+
+Linux K_hw     UNDETERMINED
 ```
 
-It is corroboration of the premise, not of the conclusion. The Linux runtime
+Note on the `ordering` line: DWC2's source-level teardown ordering is
+established independently in this repository and is not in question. What this
+reference does not supply is any Linux ordering evidence of its own. It is
+corroboration of the premise, not of the conclusion, and the Linux runtime
 question is untouched by it.
 
 ### To close the remaining gap
