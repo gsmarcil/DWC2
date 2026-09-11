@@ -1,30 +1,44 @@
 # Pending work
 
-## P-1 — Import the compatible holder-event producer
+## P-1 — Compatible holder-event producer — CLOSED (pre-runtime)
 
-The preserved legacy gadget-side source is present at:
+The canonical holder-witness producer is imported and admitted by the executable
+gate. It lives at:
 
 ```text
 r1a-device/r1a_ffs_out_v2.c
 ```
 
+It emits the JSONL event contract consumed by the frozen `holder_merge.py`, and
+`holder_roundtrip.py` builds it with warnings as errors and feeds its real
+output through the repository guard, the frozen merger, and the frozen manifest
+validator. See `HOLDER-PRODUCER-CONTRACT.md` for the consumer-to-producer
+matrix.
+
+The exact pre-holder source is preserved separately as a permanent negative
+control at:
+
 ```text
+r1a-device/legacy/r1a_ffs_out_v2.c.pre-holder
 SHA256 83ea60d3566617eefc0a1b488c2916c0482781b57156d4f0d6116958f126118e
 ```
 
-It is structurally incompatible with the active `holder_merger`: it has no
-`--event-log` and emits none of the required event sentinel, phase,
-`pending_reads`, `session_id`, `boot_id`, or `device_seq` fields. It must not be
-pinned as `device_harness`.
+That legacy file is structurally incompatible with the active `holder_merger`:
+it has no `--event-log` and emits none of the required event sentinel, phase,
+`pending_reads`, `session_id`, `boot_id`, or `device_seq` fields. It must never
+be pinned as `device_harness`, and the canonical path must never be overwritten
+with it.
 
-Before the next expanded evidence epoch is frozen, import the original matching
-producer, prove its JSONL output round-trips through `holder_merge.py`, and pin
-its source and exact built harness with the image and observer patch.
+Earlier revisions of this section printed the legacy digest directly beneath the
+canonical path, which read as an instruction to replace the admitted producer
+with the negative control. `verify_status_sync.py` now fails closed on any
+document that cites a producer digest without naming the file that actually
+hashes to it.
 
-Reason: the holder witness is load-bearing for a negative R1A campaign. An epoch that names `device_harness` without preserving the source that produced the holder log is not self-contained.
-
-Legacy-source preservation is closed. Compatible-producer import and
-expanded-epoch binding remain provenance blockers, not runtime findings.
+Closed at the pre-runtime layer only. This proves format, namespace, identity
+binding, counting rule, and fail-closed control compatibility. It proves nothing
+about real DWC2 holder depth. Binding an expanded evidence epoch to the exact
+built harness, image, and observer patch remains open and is covered by P0.
 
 ## P0 — Real hardware qualification
 

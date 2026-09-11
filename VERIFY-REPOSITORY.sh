@@ -250,20 +250,95 @@ do
     rm -f "$ctl_tmp"
 done
 
-if [ "$baseline_fail" -eq 0 ]; then
-    printf '%s\n' 'REPOSITORY_BASELINE: PASS'
+# 7. Status-document drift guard.
+#
+# Freeze the verdict of the evidence checks (1-6) before the guard runs.  The
+# documents describe the state of the evidence, so they must be measured
+# against that verdict and not against one the guard itself perturbed: a defect
+# in the guard would otherwise flip v_gate and report every truthful document
+# as stale, burying the real cause under noise.
+evidence_fail=$fail
+
+# The selftest validates the sync checker against fixture trees.  It sets only
+# the overall verdict: a broken drift guard is not a holder-producer
+# incompatibility and must never be reported as one.
+if [ ! -f verify_status_sync_selftest.py ]; then
+    failmsg status_sync_selftest
+    printf '  missing: verify_status_sync_selftest.py\n' >&2
 else
-    printf '%s\n' 'REPOSITORY_BASELINE: INCOMPLETE / RE-IMPORT REQUIRED' >&2
+    sst_tmp=${TMPDIR:-/tmp}/dwc2-status-sync-selftest.$$
+    if python3 verify_status_sync_selftest.py >"$sst_tmp" 2>&1; then
+        pass status_sync_selftest
+    else
+        failmsg status_sync_selftest
+        sed 's/^/  /' "$sst_tmp" >&2
+    fi
+    rm -f "$sst_tmp"
+fi
+
+# 8. Status-document sync.
+#
+# Resolve the evidence verdict into the exact strings the documents are required
+# to declare, then compare.  A stale declaration is a gate failure in either
+# direction: a stale RED invites a reader to "repair" a closed blocker, which in
+# this repository means editing authenticated bytes.
+if [ "$baseline_fail" -eq 0 ]; then
+    v_baseline='PASS'
+else
+    v_baseline='INCOMPLETE / RE-IMPORT REQUIRED'
 fi
 
 if [ "$foundation_fail" -eq 0 ]; then
-    printf '%s\n' 'SOURCE_FOUNDATION: PASS'
+    v_foundation='PASS'
 else
-    printf '%s\n' 'SOURCE_FOUNDATION: FAIL / MAIN NOT SELF-CONTAINED' >&2
+    v_foundation='FAIL / MAIN NOT SELF-CONTAINED'
+fi
+
+if [ "$holder_fail" -eq 0 ]; then
+    v_holder='PASS'
+else
+    v_holder='BLOCKED / PRODUCER INCOMPATIBLE'
+fi
+
+# Held to the evidence checks alone — excluding both the selftest above and the
+# sync check below.  Including the sync check would be circular and could never
+# fail; including the selftest would make a guard defect masquerade as document
+# drift.  The gate's own exit status still reflects every check.
+if [ "$evidence_fail" -eq 0 ]; then
+    v_gate='PASS'
+else
+    v_gate='FAIL'
+fi
+
+if [ ! -f verify_status_sync.py ]; then
+    failmsg status_sync
+    printf '  missing: verify_status_sync.py\n' >&2
+else
+    sync_tmp=${TMPDIR:-/tmp}/dwc2-status-sync.$$
+    if python3 verify_status_sync.py \
+        "$v_baseline" "$v_foundation" "$v_holder" "$v_gate" >"$sync_tmp" 2>&1; then
+        pass status_sync
+    else
+        failmsg status_sync
+        sed 's/^/  /' "$sync_tmp" >&2
+    fi
+    rm -f "$sync_tmp"
+fi
+
+if [ "$baseline_fail" -eq 0 ]; then
+    printf '%s\n' "REPOSITORY_BASELINE: $v_baseline"
+else
+    printf '%s\n' "REPOSITORY_BASELINE: $v_baseline" >&2
+fi
+
+if [ "$foundation_fail" -eq 0 ]; then
+    printf '%s\n' "SOURCE_FOUNDATION: $v_foundation"
+else
+    printf '%s\n' "SOURCE_FOUNDATION: $v_foundation" >&2
 fi
 
 if [ "$holder_fail" -ne 0 ]; then
-    printf '%s\n' 'HOLDER_CAMPAIGN_READINESS: BLOCKED / PRODUCER INCOMPATIBLE' >&2
+    printf '%s\n' "HOLDER_CAMPAIGN_READINESS: $v_holder" >&2
 fi
 
 if [ "$fail" -ne 0 ]; then
@@ -271,6 +346,6 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-printf '%s\n' 'HOLDER_CAMPAIGN_READINESS: PASS'
+printf '%s\n' "HOLDER_CAMPAIGN_READINESS: $v_holder"
 printf '%s\n' 'REPOSITORY_GATE: PASS'
 exit 0
