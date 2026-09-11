@@ -119,7 +119,8 @@ later hardening:
 `2b2da6574e77` does not require our inference. Its own message ties incomplete
 EndTransfer directly to continued TRB processing and possible SMMU faults, then
 adds the control-flow consequence that prevents the unmap. It is
-`Reviewed-by: Thinh Nguyen <Thinh.Nguyen@synopsys.com>`, the vendor of the IP.
+`Reviewed-by: Thinh Nguyen <Thinh.Nguyen@synopsys.com>`, providing direct
+Synopsys-side review of that lifetime rule.
 
 Scope limit, load-bearing: `e4cf6580ac74` says the delayed-stop condition is
 "applicable to all DWC_usb3x IPs". DWC2 is `DWC_otg`, a different IP family with
@@ -151,9 +152,17 @@ queued request has already been completed and unmapped, is guarded by
 hypothesis concerns. It is therefore not a pre-retirement stop under any
 reading.
 
-Verified at the pinned ref and again on `torvalds/linux` master at the time of
-writing: DWC2 gadget code contains zero occurrences of any delayed-stop flag,
-and its single unmap site is reached without any quiescence check.
+Verified at the pinned ref and again on `torvalds/linux` master at the
+time of writing: no equivalent fail-closed delayed-unmap gate was
+identified in the audited DWC2 teardown paths. In particular, the
+reset/disconnect path reaches the single DMA-unmap site without a
+preceding endpoint-stop/quiescence check.
+
+The distinction matters and an earlier draft of this section lost it. Saying
+the unmap site is reached "without any quiescence check" contradicts the
+per-path split stated above: `ep_disable` and `ep_dequeue` do attempt a stop
+and warn on timeout. Only the reset/disconnect path reaches retirement with no
+preceding stop at all.
 
 ### Interpretation
 
