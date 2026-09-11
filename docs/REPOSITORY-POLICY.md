@@ -65,6 +65,21 @@ Because this repository is private, evidence that materially supports a survivin
 
 Do not preserve failed hypotheses as current facts. If a superseded result matters to explain why a guard exists, record it in the audit history with an explicit `SUPERSEDED` label.
 
+
+## Privacy-redacted imported evidence
+
+The no-baseline-edit rule remains the default. A checked-in imported evidence
+bundle may be replaced only by a controlled privacy-redacted derivative when an
+environment-local identifier would otherwise be published. Such a transaction
+must be mechanical and non-semantic: preserve the source archive SHA256, record
+the replacement token and exact file/occurrence counts, regenerate every affected
+nested and top-level manifest plus the transport archive, prove the redacted
+archive reproduces the checked-in baseline byte-for-byte after extraction, and
+run both baseline and repository gates. The redaction itself promotes no evidence.
+
+The current v4.2 publication derivative is documented by
+`artifacts/canonical-v4.2/PRIVACY-REDACTION-RECEIPT.txt`.
+
 ## History
 
 Do **not** rewrite `main` to manufacture historical commits.

@@ -1,4 +1,4 @@
-scope audit v2: /home/claude/k/drivers/usb/dwc2/gadget.c
+scope audit v2: <WORKSPACE_HOME>/k/drivers/usb/dwc2/gadget.c
 probes found: 28
 
 ok     line 367   if (!r1 || !dwc2_r1_trackable_out_ep(hs_ep))         previous stmt is a plain statement

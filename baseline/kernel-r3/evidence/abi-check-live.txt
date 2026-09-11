@@ -1,5 +1,5 @@
 /tmp/abi_gen.gyn9gl_y/abi_probe.c: 27 record fields, 28 header fields
-regenerated probe from /home/claude/k/drivers/usb/dwc2/gadget.c
+regenerated probe from <WORKSPACE_HOME>/k/drivers/usb/dwc2/gadget.c
 
 dwc2_r1_rec (size 80)
   ok   size is 80
