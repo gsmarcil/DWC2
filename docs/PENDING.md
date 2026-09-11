@@ -185,25 +185,72 @@ Absence of a fix is not evidence of absence of a defect, and it is equally not
 evidence of one. It is recorded so the novelty of the question is documented
 rather than assumed, and so a reviewer can repeat the search.
 
-## Unverified lead: Fuchsia DWC2 workaround
-
-Reported to this repository: a Fuchsia OS commit (given as 2025-10-02,
-"Deliberately leak pinned endpoint memory") said to state that the proper fix
-would be to ensure DMA is fully stopped before unpinning memory, but that
-stopping individual DWC2 endpoints is "only reluctantly supported", so memory is
-leaked deliberately instead.
+## External corroboration: Fuchsia DWC2 quarantine workaround
 
 ```text
-status   UNVERIFIED from this environment
-reason   fuchsia.googlesource.com is blocked by the egress proxy, and web
-         search returned no corroboration for the quoted phrases
+commit        4caf5d06d7f8ac53c7e044b605a36c26d024a9ce
+title         [usb][dwc2] Deliberately leak pinned endpoint memory.
+author        johngro
+date          2025-10-02 (as reported)
+change-id     I3b26c82ebf694aa703b0239944fdf58efd935eeb
+reviewed-on   https://fuchsia-review.googlesource.com/c/fuchsia/+/1382006
+
+status        MIRROR_VERIFIED / ORIGINAL_PENDING
 ```
 
-If confirmed it would be a useful external corroboration of one premise: that
-DWC2 endpoint stop is not a reliable operation, and that an engineer who looked
-at the problem preferred leaking memory to unmapping without a guaranteed stop.
-It would still not show that Linux DWC2 has the defect, and Fuchsia does not use
-the Linux DMA API.
+### What was actually fetched
 
-It carries no weight until someone reads the commit at the Fuchsia source
-directly. Recorded as a lead so it is re-checked rather than repeated as fact.
+The commit was read at a **third-party** GitHub mirror,
+`github.com/misttech/fuchsia`, not at `fuchsia.googlesource.com` and not at the
+Gerrit review. Both of those are blocked by this environment's egress proxy.
+
+That distinction is kept deliberately. The artifact in hand is a mirror of the
+commit, so the entry claims exactly that and no more.
+
+Two things raise confidence without closing the gap: the mirror's diff touches
+the real driver files (`src/devices/usb/drivers/dwc2/dwc2.cc`, `dwc2.h`,
+`usb_dwc_regs.h`, `dwc2-test.cc`), and the message carries an internally
+consistent Gerrit `Change-Id` and `Reviewed-on` pointing at review 1382006.
+Neither substitutes for reading the original.
+
+### What the commit says
+
+Quoted from the mirrored message:
+
+```text
+"If the channel connection to this server is closed at any point in time, the
+ library (by default) will Unpin the memory. This is not safe, because no
+ attempt is made to stop the hardware which may be using this memory."
+
+"The proper thing to do would be to make certain that the DMA is 100% for sure
+ stopped before unpinning the memory."
+```
+
+Stopping individual endpoints in DWC2 is described there as "only
+_reluctantly_ supported". The chosen remedy is to leak the pinned memory to a
+**quarantine** on endpoint channel close rather than attempt to recover it.
+
+### What this corroborates, and what it does not
+
+```text
+corroborates   an engineer working on DWC2 independently identified the same
+               invariant: memory must not be released while the controller may
+               still be using it
+
+corroborates   that reliably stopping a DWC2 endpoint was judged hard enough
+               that quarantining memory was preferred to reclaiming it
+
+does NOT       show that Linux DWC2 has the defect. Fuchsia is a different
+               driver, a different codebase, and does not use the Linux DMA API.
+               Pin/unpin is not dma_map/dma_unmap.
+```
+
+It is corroboration of the premise, not of the conclusion. The Linux runtime
+question is untouched by it.
+
+### To close the remaining gap
+
+Read the commit at `fuchsia.googlesource.com` or at Gerrit review 1382006 from
+an unblocked host and upgrade the status line to `ORIGINAL_SOURCE_VERIFIED`. A
+third-party mirror is the weakest acceptable provenance for a quotation this
+load-bearing.
