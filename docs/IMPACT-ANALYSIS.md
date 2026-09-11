@@ -20,18 +20,35 @@ reading rather than trusting this file.
 Read directly from the tree, not inferred from hardware behaviour:
 
 ```text
-dwc2_hsotg_ep_disable()
-  -> if (ctrl & DXEPCTL_EPENA)                          :4243
-       dwc2_hsotg_ep_stop_xfr()                         :4244
+dwc2_hsotg_ep_disable()                                 :4247
+  -> if (ctrl & DXEPCTL_EPENA)                          :4272
+       dwc2_hsotg_ep_stop_xfr()                         :4273
+  -> set DXEPCTL_EPDIS | DXEPCTL_SNAK                   :3979
   -> wait DXEPINT_EPDISBLD, timeout 100                 :3982
   -> on timeout: dev_warn() only, no abort              :3983
   -> W1C clear of EPDISBLD                              :3987
-  -> ctrl &= ~DXEPCTL_EPENA                             :4246
-  -> kill_all_requests(..., -ESHUTDOWN)                 :4257
+  -> ctrl &= ~DXEPCTL_EPENA                             :4275
+  -> kill_all_requests(..., -ESHUTDOWN)                 :4286
   -> dwc2_hsotg_complete_request()
   -> dwc2_hsotg_unmap_dma()                             :2140
   -> usb_gadget_unmap_request() -> dma_unmap_{single,sg}()
 ```
+
+Reading notes, because two of these are easy to get wrong:
+
+`dwc2_hsotg_ep_stop_xfr` has a forward declaration at `:2939` and exactly one
+definition, at `:3917`. The wait quoted above is inside that definition.
+
+`ep_disable` is not its only caller. `dwc2_gadget_handle_nak()` reaches the same
+primitive under the same `EPENA` test at `:3009`. So the unconfirmed-stop
+primitive is entered from more than one path, and the chain above traces only the
+endpoint-disable one.
+
+An earlier revision of this file cited `:4243`, `:4244`, `:4246` and `:4257` for
+the four `ep_disable` steps. Those were off by roughly twenty-nine lines,
+derived by adding an offset to the wrong base rather than reading absolute
+numbers. They are corrected above. A line citation that does not land is worse
+than no citation, because it costs a reviewer the time to discover it is wrong.
 
 The load-bearing property is not that the driver ignores the timeout. It is that
 the driver never escalates the timeout into any positive quiescence
@@ -133,11 +150,16 @@ driver programs the length from the remaining request and then caps it:
 
 ```c
 length = ureq->length - ureq->actual;          /* :1094 */
-maxreq = get_ep_limit(hs_ep);                  /* :1099 */
+
+if (!using_desc_dma(hsotg))
+        maxreq = get_ep_limit(hs_ep);          /* :1098-1099 */
+else
+        ...
 ```
 
-A single programmed transfer can therefore span multiple packets, and `maxpacket`
-is not the bound.
+The cap is applied on the non-DDMA branch; `using_desc_dma()` is defined at
+`:103`. Either way the length originates in the remaining request, so a single
+programmed transfer can span multiple packets and `maxpacket` is not the bound.
 
 ```text
 Buffer DMA    the potential stale-write extent is bounded by DMA work
