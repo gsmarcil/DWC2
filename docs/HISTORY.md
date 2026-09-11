@@ -121,10 +121,17 @@ The DWC3 precedent chain was bound to mainline with author dates
 `c4e3ef568539`), carrying the scope limit that `e4cf6580ac74` speaks of
 DWC_usb3x while DWC2 is DWC_otg.
 
-Recorded as leads rather than evidence, because they could not be verified from
-the environment used: the tegra-xudc drain-before-unmap report, and the Fuchsia
-quarantine commit `4caf5d06d7f8`, which stands at
-`MIRROR_VERIFIED / ORIGINAL_PENDING` with its third-party mirror named.
+The Fuchsia quarantine commit `4caf5d06d7f8` is recorded as a lead at
+`MIRROR_VERIFIED / ORIGINAL_PENDING`, with its third-party mirror named.
+
+The reported tegra-xudc fix could not be verified: every mailing-list archive is
+blocked by the verifying environment. The driver was read directly instead, and
+that produced a source classification rather than a lead. `ep_wait_for_inactive`
+polls `EP_THREAD_ACTIVE` before retirement, but only on the dequeue path, and
+its `-ETIMEDOUT` is discarded by a `void` wrapper without even a warning. The
+surveyed sample in Axis 1 therefore grows from four drivers to five, with
+tegra-xudc `ATTEMPTED` on dequeue and `ABSENT` elsewhere. The reported runtime
+SMMU observation remains unverified and carries no weight.
 
 An independent finding came out of the same checking: `dwc2_hsotg_rx_data()` at
 `08df8841` still does not clamp `to_read` to `max_req`, so both halves of the

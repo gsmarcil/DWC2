@@ -50,6 +50,8 @@ ABSENT     no stop primitive on the path at all
 | **musb** | `nuke:159` | `FLUSHFIFO` writes `:177-185` + `c->channel_abort(ep->dma)` `:188` | return value logged only (`musb_dbg:189`), not acted on | **ATTEMPTED** |
 | **dwc2** — endpoint stop paths | `ep_disable:4272`, `ep_dequeue:4348` | `dwc2_hsotg_ep_stop_xfr:3917` | four waits, each `dev_warn()` then continue | **ATTEMPTED** |
 | **dwc2** — reset/disconnect | `dwc2_hsotg_disconnect:3315` → `kill_all_requests:3286` → `complete_request:2118` → `U:2140` | none | — | **ABSENT** |
+| **tegra-xudc** — dequeue | `tegra_xudc_gadget_dequeue:1453` → `req_done:1048` | `ep_pause` + `ep_wait_for_inactive:1029` | 100 µs atomic poll whose `-ETIMEDOUT` is discarded by a `void` wrapper; not even logged | **ATTEMPTED** |
+| **tegra-xudc** — other paths | any path reaching `req_done:1048` | none | — | **ABSENT** |
 
 ### The decisive contrast
 
@@ -72,8 +74,8 @@ not return until the controller reports the endpoint idle.
 
 ### Reading
 
-Two of four drivers enforce; one attempts; DWC2 attempts on two paths and does
-nothing on a third.
+Two of five drivers enforce. DWC2 attempts on two paths and does nothing on a
+third; tegra-xudc attempts on one and does nothing on the rest; musb attempts.
 
 Within this surveyed sibling-driver sample, confirmed hardware quiescence
 before request unmap is an **explicitly enforced lifetime rule in DWC3 and
@@ -98,9 +100,10 @@ premise to the DWC2 hypothesis, and no DWC2 rung moves because of them. Read as
 precedent about the shape of the question, never as inherited hardware
 contract.
 
-Sample size is four. `ENFORCED` for dwc3 and chipidea is established at this
+Sample size is five. `ENFORCED` for dwc3 and chipidea is established at this
 pin only, on the teardown paths named, and was not audited for every entry
-point into those functions.
+point into those functions. The tegra-xudc rows were classified separately at
+`08df8841` rather than at the pin, and that is stated in its section below.
 
 ### Upstream precedent for the DWC3 row
 
@@ -138,6 +141,146 @@ Scope limit, load-bearing: `e4cf6580ac74` says the delayed-stop condition is
 "applicable to all DWC_usb3x IPs". DWC2 is `DWC_otg`, a different IP family with
 a different descriptor model. That sentence therefore does not reach DWC2 by its
 own terms, and must never be quoted as if it did.
+
+### DWC2 at the pinned ref, restated per path
+
+```text
+ep_disable / ep_dequeue:
+    stop is attempted;
+    timeout is warned;
+    retirement/unmap still continues.
+
+reset / disconnect:
+    no equivalent pre-retirement stop primitive;
+    kill_all_requests()
+      -> complete_request()
+      -> DMA unmap.
+```
+
+The two paths are kept apart deliberately. They fail differently, and merging
+them into one sentence hides that one attempts a stop and the other never does.
+
+A closer reading of `kill_all_requests` sharpens the reset row further. Its only
+register operation is a TX FIFO flush, and that flush is reached **after** every
+queued request has already been completed and unmapped, is guarded by
+`dedicated_fifos`, and acts on the IN direction rather than the OUT path this
+hypothesis concerns. It is therefore not a pre-retirement stop under any
+reading.
+
+Verified at the pinned ref and again on `torvalds/linux` master at
+`08df884136f1c1197bab2a27814404fd329d9aac`: no equivalent fail-closed
+delayed-unmap gate was identified in the audited DWC2 teardown paths. In particular, the
+reset/disconnect path reaches the single DMA-unmap site without a
+preceding endpoint-stop/quiescence check.
+
+The distinction matters and an earlier draft of this section lost it. Saying
+the unmap site is reached "without any quiescence check" contradicts the
+per-path split stated above: `ep_disable` and `ep_dequeue` do attempt a stop
+and warn on timeout. Only the reset/disconnect path reaches retirement with no
+preceding stop at all.
+
+### Sibling precedent with a CVE: chipidea `_ep_nuke()`
+
+```text
+status        MERGED IN MAINLINE + CVE ASSIGNED
+commit        cea2a1257a3b  (2026-01-08)
+subject       usb: chipidea: udc: fix DMA and SG cleanup in _ep_nuke()
+cve           CVE-2026-43250, CVSS 7.8
+```
+
+CVE-2026-43250 documents the same asymmetry in chipidea that this table
+hypothesizes for DWC2: an exceptional teardown path returns requests without
+mirroring the unmap/cleanup sequence of the normal completion path.
+`_ep_nuke()` returned requests to the gadget layer without unmapping DMA
+buffers or cleaning up scatter-gather bounce buffers, while
+`_hardware_dequeue()` calls `usb_gadget_unmap_request_by_dev()` and the bounce
+cleanup. On disconnect during a multi-segment transfer, `num_mapped_sgs` and
+`sgt.sgl` stayed stale and the request was given back with `-ESHUTDOWN` while
+DMA state was still live.
+
+Two limits are load-bearing:
+
+- chipidea is a sibling driver, not DWC2. Nothing here transfers by adjacency.
+- The chipidea manifestation is stale DMA state on request reuse, not an
+  in-flight DMA write racing an unmap. The DWC2 hypothesis concerns the latter.
+  The shared structure is the missing cleanup mirror, not the failure mode.
+
+Recorded because it shows the *shape* of the hypothesis is a known bug class in
+USB gadget drivers rather than a speculative construct. It is not evidence that
+DWC2 has the same defect.
+
+### tegra-xudc, classified from source
+
+The reported tegra-xudc fix could not be verified: `lore.kernel.org`,
+`patchwork.kernel.org`, `marc.info` and `spinics.net` are all blocked by the
+verifying environment's egress proxy, and no commit with that subject exists in
+mainline. Rather than leave the row on an unreachable archive, the driver was
+read directly. That turned out to answer more than the archive would have.
+
+```text
+verified at   08df884136f1c1197bab2a27814404fd329d9aac
+file          drivers/usb/gadget/udc/tegra-xudc.c
+```
+
+A quiescence primitive already exists:
+
+```c
+static inline int xudc_readl_poll(struct tegra_xudc *xudc,
+                                  unsigned int offset, u32 mask, u32 val)
+{
+        u32 regval;
+
+        return readl_poll_timeout_atomic(xudc->base + offset, regval,
+                                         (regval & mask) == val, 1, 100);
+}                                                               /* :594 */
+
+static void ep_wait_for_inactive(struct tegra_xudc *xudc, unsigned int ep)
+{
+        xudc_readl_poll(xudc, EP_THREAD_ACTIVE, BIT(ep), 0);
+}                                                               /* :1029 */
+```
+
+It is called from exactly one place, in the dequeue path, before retirement:
+
+```c
+/* Halt DMA for this endpoint. */
+if (ep_ctx_read_state(ep->context) == EP_STATE_RUNNING) {
+        ep_pause(xudc, ep->index);
+        ep_wait_for_inactive(xudc, ep->index);          /* :1454 */
+}
+```
+
+and the single unmap site is inside `tegra_xudc_req_done()` at `:1048`/`:1052`,
+which unmaps and then gives the request back.
+
+**The return value is discarded.** `xudc_readl_poll` returns `-ETIMEDOUT` after
+a 100 microsecond atomic poll, and `ep_wait_for_inactive` is `void`. On timeout
+execution proceeds to `req_done` and the unmap with no control-flow consequence
+and, unlike DWC2, without even a warning.
+
+Against the `L2.2` vocabulary:
+
+```text
+dequeue path         stop issued (ep_pause), wait attempted, timeout
+                     silently discarded          -> ATTEMPTED
+                     (weaker than the DWC2 endpoint paths in one respect:
+                      those at least log the timeout)
+
+all other paths      ep_wait_for_inactive is never called; retirement
+                     reaches the same unmap site   -> ABSENT
+```
+
+This matters in two ways. It raises the surveyed sample from four drivers to
+five without leaving the source level. And it independently explains why a
+drain-before-unmap patch would be proposed for this driver at all: the drain
+already exists, covers one path, and drops its own timeout. A patch extending it
+and acting on the timeout is the natural next step, which makes the reported fix
+plausible in shape even though its text remains unverified here.
+
+What is still not established: the reported SMMU fault observation on Tegra234.
+That is a runtime claim, it was not reproduced or read from a primary source,
+and it carries **no evidentiary weight** for PRIMARY-A. Only the source
+classification above is admitted.
 
 ### DWC2 at the pinned ref, restated per path
 
