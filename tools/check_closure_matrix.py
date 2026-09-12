@@ -21,7 +21,8 @@ REQUIRED_DIMENSIONS = (
     'diagnostic_mmio_excluded', 'timing_perturbation_sensitivity',
     'mapping_lineage_design', 'consumer_compatibility', 'negative_controls',
     'cross_tree_duplicate_census', 'provenance', 'documentation_sync',
-    'runtime_requirements', 'runtime_execution', 'hypothesis_result',
+    'runtime_requirements', 'runtime_execution', 'run_epoch_binding',
+    'hypothesis_result',
     'external_evidence_boundary', 'impact_claim_boundary',
     'continuous_enforcement',
 )
@@ -30,6 +31,24 @@ REQUIRED_DIMENSIONS = (
 # only a NEGATIVE closure. Mixing these produced a circular gate in v1, where
 # the campaign could not be READY until the campaign had already run.
 BLOCK_KINDS = {'run_readiness', 'evidence_admissibility', 'negative_closure', 'none'}
+
+# Policy, not data. v2 let the matrix declare which verdict a row blocked, so a
+# row could be demoted to 'none' and vanish from a verdict without ever being
+# closed. The map is canonical here and the matrix must agree with it.
+EXPECTED_BLOCKS = {
+    'measurement_disabled_build': 'run_readiness',
+    'measurement_enabled_build': 'run_readiness',
+    'target_arm64_build': 'run_readiness',
+    'campaign_composition': 'run_readiness',
+    'functional_semantics_preservation': 'run_readiness',
+    'event_ordering': 'evidence_admissibility',
+    'diagnostic_mmio_excluded': 'evidence_admissibility',
+    'mapping_lineage_design': 'evidence_admissibility',
+    'consumer_compatibility': 'evidence_admissibility',
+    'runtime_execution': 'evidence_admissibility',
+    'run_epoch_binding': 'evidence_admissibility',
+    'timing_perturbation_sensitivity': 'negative_closure',
+}
 ALLOWED_RUNTIME = {'NOT_RUN', 'VALID_RUN', 'INVALID_RUN'}
 ALLOWED_HYPOTHESIS = {'UNDETERMINED', 'PROVEN', 'DISPROVEN', 'CONFIG_SCOPED_NEGATIVE'}
 ALLOWED_REVIEW_STATES = {'PASS', 'OPEN', 'FAIL'}
@@ -73,6 +92,35 @@ def state_from_receipt(value):
 
 def all_tokens(text: str, tokens) -> bool:
     return all(token in text for token in tokens)
+
+
+def consumer_fixtures() -> dict:
+    """Traces the reviewer generates, so the consumer is tested by this checker.
+
+    One good trace that must be accepted, and one per rejection the contract
+    requires. The good trace exists so a consumer that rejects everything, which
+    would carry no information, cannot pass.
+    """
+    def rec(stage, **kw):
+        base = {'stage': stage, 'req_id': 1, 'map_id': 1, 'dma': 4096,
+                'reset_id': 0, 'flags': 0}
+        base.update(kw)
+        return json.dumps(base)
+
+    good = [rec('MAP'), rec('DMA_ADDR_WRITTEN'), rec('EP_ARMED'),
+            rec('EPDIS_WRITTEN'), rec('WAIT_RETURN'), rec('PRE_U'),
+            rec('UNMAP_BEGIN'), rec('UNMAP_DONE')]
+    join = lambda rows: '\n'.join(rows) + '\n'
+    return {
+        'good': join(good),
+        'diag_build': join([rec('MAP', flags=128)] + good[1:]),
+        'req_mismatch': join(good[:4] + [rec('WAIT_RETURN', req_id=2)] + good[5:]),
+        'map_mismatch': join(good[:4] + [rec('WAIT_RETURN', map_id=99)] + good[5:]),
+        'dma_mismatch': join(good[:4] + [rec('WAIT_RETURN', dma=8192)] + good[5:]),
+        'missing_event': join([r for r in good if 'UNMAP_DONE' not in r]),
+        'wrong_order': join(good[:3] + [good[5], good[4]] + good[6:]),
+        'reset_epoch_mismatch': join(good[:6] + [rec('UNMAP_BEGIN', reset_id=7)] + good[7:]),
+    }
 
 
 def compute_states(root: Path):
@@ -136,12 +184,17 @@ def compute_states(root: Path):
             return False
         return w < e < q
     def addr_before_arm(text):
+        # Enum members carry both names, so matching the names alone succeeded
+        # on the declaration order and measured nothing. Anchor on the CALL
+        # sites and on the register writes they must follow.
         try:
-            a = text.index('DWC2_R1_DMA_ADDR_WRITTEN')
-            b = text.index('DWC2_R1_EP_ARMED', a)
+            dma_w = text.index('dwc2_writel(hsotg, ureq->dma, dma_reg)')
+            a = text.index('dwc2_r1_measure_dma_addr_written(', dma_w)
+            arm_w = text.index('dwc2_writel(hsotg, ctrl, epctrl_reg)', a)
+            b = text.index('dwc2_r1_measure_ep_armed(', arm_w)
         except ValueError:
             return False
-        return a < b
+        return dma_w < a < arm_w < b
     states['event_ordering'] = 'PASS' if (
         all_tokens(receipt_text, ['criterion_1_epdis_event_after_write=PASS',
                                   'criterion_3_programmed_split=PASS']) and
@@ -170,8 +223,13 @@ def compute_states(root: Path):
     outside = added
     for reg in regions:
         outside = outside.replace(reg, '')
-    diag_guarded = (any('dwc2_readl(hsotg, DOEPCTL' in r for r in regions) and
-                    'dwc2_readl(hsotg, DOEPCTL' not in outside)
+    # All three snapshot registers, not just the first. Moving DOEPINT or
+    # DOEPTSIZ outside the guard would have gone undetected.
+    SNAP_REGS = ('DOEPCTL', 'DOEPINT', 'DOEPTSIZ')
+    diag_guarded = all(
+        any(f'dwc2_readl(hsotg, {r}(' in reg for reg in regions) and
+        f'dwc2_readl(hsotg, {r}(' not in outside
+        for r in SNAP_REGS)
     states['diagnostic_mmio_excluded'] = 'PASS' if (
         all_tokens(receipt_text, ['criterion_2_zero_mmio_in_decisive_window=PASS']) and
         diag_guarded and
@@ -187,9 +245,16 @@ def compute_states(root: Path):
     states['timing_perturbation_sensitivity'] = state_from_receipt(
         receipt.get('timing_perturbation_sensitivity'))
 
-    states['mapping_lineage_design'] = 'PASS' if all_tokens(patch, [
-        'r1_req_id', 'r1_map_id', 'r1_dma', 'DWC2_R1_MAP',
-        'DWC2_R1_DMA_ADDR_WRITTEN', 'DWC2_R1_UNMAP_BEGIN', 'DWC2_R1_UNMAP_DONE']) else 'FAIL'
+    # Token presence proved only that the names exist. The identity must be
+    # assigned at MAP and emitted by the shared emitter, so every stage carries
+    # the same lineage rather than each inventing its own.
+    lineage_assigned = all(f'hs_req->{f} =' in added or f'hs_req->{f}++' in added
+                           for f in ('r1_req_id', 'r1_map_id', 'r1_dma'))
+    lineage_emitted = all(f'hs_req->{f}' in added for f in ('r1_req_id', 'r1_map_id'))
+    stages_present = all_tokens(patch, ['DWC2_R1_MAP', 'DWC2_R1_DMA_ADDR_WRITTEN',
+                                        'DWC2_R1_UNMAP_BEGIN', 'DWC2_R1_UNMAP_DONE'])
+    states['mapping_lineage_design'] = 'PASS' if (
+        lineage_assigned and lineage_emitted and stages_present) else 'FAIL'
 
     # v1 closed this on two empty files plus two names in the verifier. It never
     # ran anything. A consumer that cannot reject a bad trace cannot adjudicate
@@ -200,18 +265,36 @@ def compute_states(root: Path):
     REQUIRED_REJECTIONS = ('diag_build', 'req_mismatch', 'map_mismatch',
                            'dma_mismatch', 'missing_event', 'wrong_order',
                            'reset_epoch_mismatch')
+    # v2 trusted the consumer's own selftest to announce its rejections, which a
+    # selftest could satisfy by printing the words and exiting 0. The reviewer
+    # must hold the negative controls: this checker generates each bad trace
+    # itself and requires the consumer to reject it, plus one good trace it must
+    # accept, so a checker that rejects everything fails too.
     states['consumer_compatibility'] = 'OPEN'
     if (consumer.is_file() and consumer_test.is_file() and
             all_tokens(verifier, ['validate_r1_lifetime_trace_selftest.py',
                                   'validate_r1_lifetime_trace.py'])):
         try:
-            proc = subprocess.run([sys.executable, str(consumer_test), 'selftest'],
-                                  cwd=str(root), capture_output=True, text=True,
-                                  timeout=120)
-            out = proc.stdout + proc.stderr
-            if proc.returncode == 0 and all(r in out for r in REQUIRED_REJECTIONS):
-                states['consumer_compatibility'] = 'PASS'
-        except Exception:
+            own = subprocess.run([sys.executable, str(consumer_test), 'selftest'],
+                                 cwd=str(root), capture_output=True, text=True,
+                                 timeout=120)
+            ok = own.returncode == 0
+            with tempfile.TemporaryDirectory() as td:
+                for name, trace in consumer_fixtures().items():
+                    f = Path(td) / f'{name}.jsonl'
+                    f.write_text(trace, encoding='utf-8')
+                    r = subprocess.run([sys.executable, str(consumer), str(f)],
+                                       cwd=str(root), capture_output=True,
+                                       text=True, timeout=60)
+                    should_accept = (name == 'good')
+                    if (r.returncode == 0) != should_accept:
+                        ok = False
+                        errors.append(f'consumer mishandled fixture {name}: '
+                                      f'rc={r.returncode}, expected '
+                                      f'{"accept" if should_accept else "reject"}')
+            states['consumer_compatibility'] = 'PASS' if ok else 'FAIL'
+        except Exception as exc:
+            errors.append(f'consumer could not be exercised: {exc}')
             states['consumer_compatibility'] = 'OPEN'
 
     states['negative_controls'] = 'PASS' if all_tokens(verifier, [
@@ -271,7 +354,43 @@ def compute_states(root: Path):
                                    'INVALID_RUN': 'FAIL'}[runtime_state]
     # The result axis is never a gate failure. An undetermined hypothesis is an
     # open question, and a disproof is a finding, not a defect.
-    states['hypothesis_result'] = 'OPEN' if hypothesis == 'UNDETERMINED' else 'PASS'
+    # v2 let any non-UNDETERMINED token become PASS, so editing one word in a
+    # text file could declare the hypothesis proven. The outcome must be
+    # consistent with the run that produced it, and admissibility is checked by
+    # the matrix layer, not asserted here.
+    if hypothesis == 'UNDETERMINED':
+        states['hypothesis_result'] = 'OPEN'
+    elif runtime_state != 'VALID_RUN':
+        errors.append(f'hypothesis_result {hypothesis} requires runtime_execution'
+                      f'=VALID_RUN, got {runtime_state}')
+        states['hypothesis_result'] = 'FAIL'
+    else:
+        states['hypothesis_result'] = 'PASS'
+
+    # Epoch binding: the run must be tied to the artifacts that closed readiness,
+    # or gates closed later could retroactively bless an older kernel.
+    EPOCH_FIELDS = ('epoch_id', 'kernel_commit', 'kernel_build_id', 'patch_sha256',
+                    'config_sha256', 'device_harness_sha256', 'host_harness_sha256',
+                    'observer_contract', 'boot_id')
+    epoch = root / 'docs/RUN-EPOCH.txt'
+    states['run_epoch_binding'] = 'OPEN'
+    if epoch.is_file():
+        rec = parse_receipt(epoch.read_text(encoding='utf-8'))
+        missing = [f for f in EPOCH_FIELDS if not rec.get(f)]
+        if missing:
+            errors.append('run epoch missing fields: ' + ', '.join(missing))
+            states['run_epoch_binding'] = 'FAIL'
+        elif rec.get('patch_sha256') != receipt.get('patch_sha256'):
+            errors.append('run epoch patch_sha256 does not match the instrumentation receipt')
+            states['run_epoch_binding'] = 'FAIL'
+        elif rec.get('kernel_commit') != EXPECTED_KERNEL_PIN:
+            errors.append('run epoch kernel_commit is not the pinned kernel')
+            states['run_epoch_binding'] = 'FAIL'
+        else:
+            states['run_epoch_binding'] = 'PASS'
+    elif runtime_state != 'NOT_RUN':
+        errors.append('a run is declared but docs/RUN-EPOCH.txt is absent')
+        states['run_epoch_binding'] = 'FAIL'
 
     impact_path = root / 'docs/IMPACT-ANALYSIS.md'
     if impact_path.is_file():
@@ -301,8 +420,8 @@ def validate_matrix(root: Path, matrix_path: Path = MATRIX_PATH):
     except Exception as exc:
         return [f'invalid matrix JSON: {exc}']
 
-    if data.get('schema_version') != 2:
-        errors.append(f"schema_version must be 2, got {data.get('schema_version')!r}")
+    if data.get('schema_version') != 3:
+        errors.append(f"schema_version must be 3, got {data.get('schema_version')!r}")
     if not isinstance(data.get('contract_id'), str) or not data['contract_id'].strip():
         errors.append('contract_id must be a non-empty string')
 
@@ -367,35 +486,31 @@ def validate_matrix(root: Path, matrix_path: Path = MATRIX_PATH):
         kind = dim.get('blocks')
         if kind not in BLOCK_KINDS:
             errors.append(f'{ident}: blocks must be one of {sorted(BLOCK_KINDS)}, got {kind!r}')
-        if kind == 'run_readiness' and ident in ('runtime_execution', 'hypothesis_result'):
-            errors.append(f'{ident}: cannot block run_readiness; that is the circularity v1 had')
+        expected = EXPECTED_BLOCKS.get(ident, 'none')
+        if kind != expected:
+            errors.append(f'{ident}: blocks must be {expected!r} by policy, matrix says {kind!r}')
 
-    def verdict(kind):
-        rows = [d for d in REQUIRED_DIMENSIONS if by_id.get(d, {}).get('blocks') == kind]
-        return 'READY' if rows and all(by_id[d].get('review_state') == 'PASS'
-                                       for d in rows) else 'BLOCKED'
+    def rows_pass(kind):
+        rows = [d for d in REQUIRED_DIMENSIONS if EXPECTED_BLOCKS.get(d) == kind]
+        return bool(rows) and all(by_id.get(d, {}).get('review_state') == 'PASS'
+                                  for d in rows)
 
-    for key, kind in (('run_readiness', 'run_readiness'),
-                      ('evidence_admissibility', 'evidence_admissibility')):
-        computed = verdict(kind)
+    # Hierarchical, not parallel. v2 computed each verdict from its own rows
+    # only, so evidence could read READY while the builds that produced it were
+    # still open, and a negative closure could read READY on top of inadmissible
+    # evidence. NEGATIVE => EVIDENCE => RUN.
+    run_ok = rows_pass('run_readiness')
+    evid_ok = run_ok and rows_pass('evidence_admissibility')
+    neg_ok = evid_ok and rows_pass('negative_closure')
+    computed = {'run_readiness': 'READY' if run_ok else 'BLOCKED',
+                'evidence_admissibility': 'READY' if evid_ok else 'BLOCKED',
+                'negative_closure_admissibility': 'READY' if neg_ok else 'BLOCKED'}
+    for key, value in computed.items():
         declared = data.get(key)
         if declared not in ALLOWED_CAMPAIGN:
             errors.append(f'invalid {key} {declared!r}')
-        elif declared != computed:
-            errors.append(f'{key}: matrix says {declared}, computed {computed}')
-
-    # Negative closure has its own admissibility, because an instrument that can
-    # only bias toward "safe" invalidates a negative result and not a positive.
-    neg_rows = [d for d in REQUIRED_DIMENSIONS
-                if by_id.get(d, {}).get('blocks') == 'negative_closure']
-    computed_neg = 'READY' if neg_rows and all(
-        by_id[d].get('review_state') == 'PASS' for d in neg_rows) else 'BLOCKED'
-    declared_neg = data.get('negative_closure_admissibility')
-    if declared_neg not in ALLOWED_CAMPAIGN:
-        errors.append(f'invalid negative_closure_admissibility {declared_neg!r}')
-    elif declared_neg != computed_neg:
-        errors.append(f'negative_closure_admissibility: matrix says {declared_neg}, '
-                      f'computed {computed_neg}')
+        elif declared != value:
+            errors.append(f'{key}: matrix says {declared}, computed {value}')
     return errors
 
 
@@ -431,24 +546,12 @@ def fixture_matrix(states=None) -> dict:
         'negative_controls': 'PASS', 'cross_tree_duplicate_census': 'PASS',
         'provenance': 'PASS', 'documentation_sync': 'PASS',
         'runtime_requirements': 'PASS', 'runtime_execution': 'OPEN',
-        'hypothesis_result': 'OPEN', 'external_evidence_boundary': 'PASS',
+        'run_epoch_binding': 'OPEN', 'hypothesis_result': 'OPEN', 'external_evidence_boundary': 'PASS',
         'impact_claim_boundary': 'PASS', 'continuous_enforcement': 'OPEN',
     }
     if states:
         base.update(states)
-    BLOCKS = {
-        'measurement_disabled_build': 'run_readiness',
-        'measurement_enabled_build': 'run_readiness',
-        'target_arm64_build': 'run_readiness',
-        'campaign_composition': 'run_readiness',
-        'functional_semantics_preservation': 'run_readiness',
-        'consumer_compatibility': 'evidence_admissibility',
-        'runtime_execution': 'evidence_admissibility',
-        'mapping_lineage_design': 'evidence_admissibility',
-        'event_ordering': 'evidence_admissibility',
-        'diagnostic_mmio_excluded': 'evidence_admissibility',
-        'timing_perturbation_sensitivity': 'negative_closure',
-    }
+    BLOCKS = EXPECTED_BLOCKS
     dims = []
     for ident in REQUIRED_DIMENSIONS:
         state = base[ident]
@@ -460,14 +563,17 @@ def fixture_matrix(states=None) -> dict:
             dim['blocker'] = 'fixture blocker'
         dims.append(dim)
 
-    def verdict(kind):
+    def rows_pass(kind):
         rows = [d for d in dims if d['blocks'] == kind]
-        return 'READY' if rows and all(d['review_state'] == 'PASS' for d in rows) else 'BLOCKED'
+        return bool(rows) and all(d['review_state'] == 'PASS' for d in rows)
 
-    return {'schema_version': 2, 'contract_id': 'fixture-v2',
-            'run_readiness': verdict('run_readiness'),
-            'evidence_admissibility': verdict('evidence_admissibility'),
-            'negative_closure_admissibility': verdict('negative_closure'),
+    run_ok = rows_pass('run_readiness')
+    evid_ok = run_ok and rows_pass('evidence_admissibility')
+    neg_ok = evid_ok and rows_pass('negative_closure')
+    return {'schema_version': 3, 'contract_id': 'fixture-v3',
+            'run_readiness': 'READY' if run_ok else 'BLOCKED',
+            'evidence_admissibility': 'READY' if evid_ok else 'BLOCKED',
+            'negative_closure_admissibility': 'READY' if neg_ok else 'BLOCKED',
             'dimensions': dims}
 
 
@@ -481,12 +587,22 @@ GOOD_PATCH = """--- a/x
 +\tdwc2_set_bit(hsotg, epctrl_reg, DXEPCTL_EPDIS | DXEPCTL_SNAK);
 +\tdwc2_r1_measure_event(DWC2_R1_EPDIS_WRITTEN);
 +\tdwc2_hsotg_wait_bit_set(hsotg, epint_reg, DXEPINT_EPDISBLD, 100);
-+\tdwc2_r1_measure_dma_addr_written(DWC2_R1_DMA_ADDR_WRITTEN);
-+\tdwc2_r1_measure_ep_armed(DWC2_R1_EP_ARMED);
++\t\t\tdwc2_writel(hsotg, ureq->dma, dma_reg);
++\t\t\tdwc2_r1_measure_dma_addr_written(hsotg, hs_ep, hs_req, ureq->dma);
++\t\t\t/* stage DWC2_R1_DMA_ADDR_WRITTEN */
++\tdwc2_writel(hsotg, ctrl, epctrl_reg);
++\tdwc2_r1_measure_ep_armed(hsotg, hs_ep, hs_req, true);
 +#ifdef CONFIG_USB_DWC2_R1_MEASURE_DIAG
 +\t\tepctl = dwc2_readl(hsotg, DOEPCTL(hs_ep->index));
++\t\tepint = dwc2_readl(hsotg, DOEPINT(hs_ep->index));
++\t\tepsiz = dwc2_readl(hsotg, DOEPTSIZ(hs_ep->index));
 +#endif
-+r1_req_id r1_map_id r1_dma DWC2_R1_MAP DWC2_R1_UNMAP_BEGIN DWC2_R1_UNMAP_DONE
++\ths_req->r1_req_id = 1;
++\ths_req->r1_map_id = 1;
++\ths_req->r1_dma = hs_req->req.dma;
++\tevent_dma = hs_req->r1_dma;
++\tdwc2_r1_emit(hsotg, hs_ep, hs_req, DWC2_R1_MAP, hs_req->r1_req_id, hs_req->r1_map_id);
++\tDWC2_R1_UNMAP_BEGIN DWC2_R1_UNMAP_DONE
 """
 
 
@@ -550,11 +666,23 @@ def _rehash(root: Path) -> None:
     rp.write_text(rec.replace(old, 'patch_sha256=' + sha256(root / PATCH_PATH)))
 
 
+def write_epoch(root: Path, **over) -> None:
+    rec = {'epoch_id': 'E1', 'kernel_commit': EXPECTED_KERNEL_PIN,
+           'kernel_build_id': 'bid', 'patch_sha256': sha256(root / PATCH_PATH),
+           'config_sha256': 'c', 'device_harness_sha256': 'd',
+           'host_harness_sha256': 'h', 'observer_contract': 'abi9', 'boot_id': 'b'}
+    rec.update(over)
+    (root / 'docs/RUN-EPOCH.txt').write_text(
+        ''.join(f'{k}={v}\n' for k, v in rec.items()), encoding='utf-8')
+
+
 def selftest() -> int:
     failures = 0
+    ran = 0
 
     def expect(name, mutator, should_pass):
-        nonlocal failures
+        nonlocal failures, ran
+        ran += 1
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_fixture(root)
@@ -628,8 +756,10 @@ def selftest() -> int:
     def valid_run_reaches_pass(r):
         (r / 'docs/RUNTIME-STATE.txt').write_text(
             'runtime_execution=VALID_RUN\nhypothesis_result=DISPROVEN\n')
+        write_epoch(r)
         p = r / MATRIX_PATH
-        d = fixture_matrix({'runtime_execution': 'PASS', 'hypothesis_result': 'PASS'})
+        d = fixture_matrix({'runtime_execution': 'PASS', 'hypothesis_result': 'PASS',
+                            'run_epoch_binding': 'PASS'})
         p.write_text(json.dumps(d))
     expect('a valid run that disproves the hypothesis is a PASS',
            valid_run_reaches_pass, True)
@@ -637,8 +767,9 @@ def selftest() -> int:
     def invalid_run_is_fail(r):
         (r / 'docs/RUNTIME-STATE.txt').write_text(
             'runtime_execution=INVALID_RUN\nhypothesis_result=UNDETERMINED\n')
+        write_epoch(r)
         p = r / MATRIX_PATH
-        d = fixture_matrix({'runtime_execution': 'FAIL'})
+        d = fixture_matrix({'runtime_execution': 'FAIL', 'run_epoch_binding': 'PASS'})
         for x in d['dimensions']:
             if x['id'] == 'runtime_execution':
                 x['blocker'] = 'invalid run'
@@ -716,10 +847,64 @@ def selftest() -> int:
             'runtime_execution=MAYBE\nhypothesis_result=UNDETERMINED\n')
     expect('unknown runtime state token rejected', bad_runtime_token, False)
 
+    def demote_blocks(r):
+        p = r / MATRIX_PATH; d = json.loads(p.read_text())
+        for x in d['dimensions']:
+            if x['id'] == 'measurement_enabled_build':
+                x['blocks'] = 'none'
+        p.write_text(json.dumps(d))
+    expect('a blocker cannot be demoted to none', demote_blocks, False)
+
+    def evidence_ready_over_blocked_run(r):
+        p = r / MATRIX_PATH
+        d = fixture_matrix({k: 'PASS' for k in EXPECTED_BLOCKS
+                            if EXPECTED_BLOCKS[k] == 'evidence_admissibility'})
+        d['evidence_admissibility'] = 'READY'
+        p.write_text(json.dumps(d))
+    expect('evidence cannot be ready while the run is blocked',
+           evidence_ready_over_blocked_run, False)
+
+    def proven_without_run(r):
+        (r / 'docs/RUNTIME-STATE.txt').write_text(
+            'runtime_execution=NOT_RUN\nhypothesis_result=PROVEN\n')
+    expect('PROVEN without a valid run is rejected', proven_without_run, False)
+
+    def epoch_wrong_patch(r):
+        (r / 'docs/RUNTIME-STATE.txt').write_text(
+            'runtime_execution=VALID_RUN\nhypothesis_result=UNDETERMINED\n')
+        write_epoch(r, patch_sha256='deadbeef')
+    expect('run epoch bound to a different patch is rejected', epoch_wrong_patch, False)
+
+    def mmio_partial_guard(r):
+        bad = GOOD_PATCH.replace(
+            '+\t\tepsiz = dwc2_readl(hsotg, DOEPTSIZ(hs_ep->index));\n', '')
+        bad = bad.replace('+#endif\n',
+                          '+#endif\n+\t\tepsiz = dwc2_readl(hsotg, DOEPTSIZ(hs_ep->index));\n')
+        (r / PATCH_PATH).write_text(bad); _rehash(r)
+    expect('one snapshot register left outside the guard is rejected',
+           mmio_partial_guard, False)
+
+    def arm_order_by_enum_only(r):
+        bad = GOOD_PATCH.replace(
+            '+\t\t\tdwc2_writel(hsotg, ureq->dma, dma_reg);\n'
+            '+\t\t\tdwc2_r1_measure_dma_addr_written(hsotg, hs_ep, hs_req, ureq->dma);\n',
+            '+\tDWC2_R1_DMA_ADDR_WRITTEN = 2,\n')
+        (r / PATCH_PATH).write_text(bad); _rehash(r)
+    expect('enum declaration order does not satisfy the call-site predicate',
+           arm_order_by_enum_only, False)
+
+    def lineage_named_not_assigned(r):
+        bad = GOOD_PATCH.replace('+\ths_req->r1_map_id = 1;\n', '+\tr1_map_id\n')
+        (r / PATCH_PATH).write_text(bad); _rehash(r)
+    expect('lineage named but never assigned is rejected',
+           lineage_named_not_assigned, False)
+
     if failures:
         print(f'CLOSURE_MATRIX_SELFTEST: FAIL ({failures})', file=sys.stderr)
         return 1
-    print('CLOSURE_MATRIX_SELFTEST: PASS (20/20 controls)')
+    # Derived, not typed. v2 printed 20/20 while running 21 controls, which is
+    # the same "a number that says so" failure this contract exists to prevent.
+    print(f'CLOSURE_MATRIX_SELFTEST: PASS ({ran}/{ran} controls)')
     return 0
 
 

@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "contract_id": "dwc2-r1a-closure-v2",
+  "schema_version": 3,
+  "contract_id": "dwc2-r1a-closure-v3",
   "run_readiness": "BLOCKED",
   "evidence_admissibility": "BLOCKED",
   "negative_closure_admissibility": "BLOCKED",
@@ -176,6 +176,16 @@
       "close_artifact": "one valid measurement on real DWC2 hardware, recorded as VALID_RUN"
     },
     {
+      "id": "run_epoch_binding",
+      "review_state": "OPEN",
+      "evidence_state": "no run yet; when one happens it must be bound to the artifacts that closed readiness",
+      "blocks": "evidence_admissibility",
+      "sources": [
+        "docs/RUNTIME-STATE.txt"
+      ],
+      "close_artifact": "docs/RUN-EPOCH.txt carrying epoch_id, kernel_commit, kernel_build_id, patch_sha256, config_sha256, device and host harness digests, observer_contract and boot_id, with patch and commit matching the instrumentation receipt"
+    },
+    {
       "id": "hypothesis_result",
       "review_state": "OPEN",
       "evidence_state": "UNDETERMINED; a disproof is a finding, never a gate failure",
@@ -209,7 +219,8 @@
       "evidence_state": "observed NOT ENFORCED: branch protection off, no required checks, no rulesets",
       "blocks": "none",
       "sources": [
-        "VERIFY-REPOSITORY.sh"
+        "external:github-api/main-branch-protection",
+        "external:github-api/repository-rulesets"
       ],
       "close_artifact": "branch protection requiring this gate, evidenced outside these bytes"
     }
