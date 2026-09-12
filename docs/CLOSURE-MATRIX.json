@@ -1,8 +1,8 @@
 {
-  "schema_version": 4,
-  "contract_id": "dwc2-r1a-closure-v4",
+  "schema_version": 5,
+  "contract_id": "dwc2-r1a-closure-v5",
   "closing_invariant": "No PASS may rest solely on a state file, a receipt=PASS line, or a non-empty metadata field. Every PASS ends in an artifact plus an independent predicate.",
-  "freeze_semantics": "OPEN with no closing artifact declared is a valid unresolved state. OPEN when a closing artifact appears is a stale contract and fails the gate until an independent predicate is written and the derivation kind is deliberately upgraded. PASS means the artifact was independently re-derived. FAIL means a contradiction, an invalid artifact, or an invalid run. OPEN is not an absorption state: it asserts only that nothing currently permits PASS to be re-derived.",
+  "freeze_semantics": "OPEN with no closing artifact declared is a valid unresolved state. A closing artifact that appears for a row the contract cannot re-derive is a stale contract and fails the gate, whether no admissible derivation exists for that row or its predicate did not run. PASS means the artifact was independently re-derived by a predicate that can also reject. FAIL means a contradiction, an invalid artifact, or an invalid run, and needs no predicate to be believed. OPEN is not an absorption state: it asserts only that nothing currently permits PASS to be re-derived. Drift is measured relative to the frozen baseline, not to the bare presence of a claim: a claim already declared and disclosed at the freeze is the baseline, and only movement away from it is drift.",
   "run_readiness": "BLOCKED",
   "evidence_admissibility": "BLOCKED",
   "negative_closure_admissibility": "BLOCKED",
@@ -81,7 +81,7 @@
         "r1a-device/instrumentation/APPLY-GATE.md"
       ],
       "derivation": "checker_executed",
-      "close_artifact": "tools/check_functional_semantics.py proving no HW write removed or reordered, no return value changed, no new abort path, no lock or ownership change, and CONFIG=n identical to the original path"
+      "close_artifact": "tools/check_functional_semantics.py proving no HW write removed or reordered, no return value changed, no new abort path, no lock or ownership change, and CONFIG=n identical to the original path; plus an independent selftest, both wired into VERIFY-REPOSITORY.sh, the predicate succeeding on the pinned tree, AND the predicate rejecting a tree the reviewer breaks here. Exit 0 alone does not close this row: a checker that cannot reject carries no information, and negative_controls already asserts that this repository\u2019s checkers discriminate."
     },
     {
       "id": "event_ordering",

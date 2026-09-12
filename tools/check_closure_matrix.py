@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,15 @@ PATCH_PATH = Path('r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.patch
 RECEIPT_PATH = Path('r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.RECEIPT.txt')
 VERIFIER_PATH = Path('VERIFY-REPOSITORY.sh')
 EXPECTED_KERNEL_PIN = 'f5a7e2ae5f0a9a5caf59501457938eeb249a7dc8'
+
+# v5, not v4. d51f163 changed a state-transition semantic - a declared closure
+# moved from a silent OPEN to a gate failure - while the matrix still called
+# itself v4. An artifact must be attributable to the contract it was judged
+# under, so the identity moves with the semantics. contract_id is pinned here
+# too: v4 accepted any non-empty string, which made it one more field asserting
+# something no control measured.
+SCHEMA_VERSION = 5
+EXPECTED_CONTRACT_ID = 'dwc2-r1a-closure-v5'
 
 REQUIRED_DIMENSIONS = (
     'source_pin', 'standalone_apply', 'measurement_disabled_build',
@@ -72,12 +82,12 @@ DERIVATION = {
 }
 DECLARATION_ONLY = {'declaration_only', 'partial_binding'}
 
-# The freeze, made mechanical.
+# The freeze, made mechanical, as one rule over every closable row:
 #
-#   OPEN, no closing artifact declared  -> valid unresolved state, gate green
-#   OPEN, a closing artifact appears    -> the contract is stale, gate FAIL
-#   PASS                                -> artifact independently re-derived
-#   FAIL                                -> contradiction, invalid artifact, invalid run
+#   closure signal absent                           -> OPEN is allowed
+#   signal present, no admissible derivation        -> CONTRACT DRIFT
+#   signal present, independent predicate succeeds  -> PASS
+#   independent predicate fails                     -> FAIL
 #
 # OPEN is not an absorption state. It says only: nothing here currently permits
 # PASS to be re-derived. When evidence arrives that WOULD close a row but no
@@ -86,20 +96,29 @@ DECLARATION_ONLY = {'declaration_only', 'partial_binding'}
 # represent, and the repository reads green while a researcher assumes it is
 # merely "not updated yet".
 #
-# Five declaration_only rows get this for free: their declarations run through
-# state_from_receipt(), so a closing claim computes PASS and the clamp below
-# fires. The four rows here do not - each is pinned to OPEN by hand, which
-# swallowed the claim silently. Their claim signal is therefore explicit, and
-# frozen says whether that claim was already present, and disclosed, at v4.
-FROZEN_CLAIM = {
-    # Three receipt lines assert the apply succeeded. That claim predates the
-    # freeze and is disclosed in the matrix as OPEN with a close_artifact, so it
-    # is the baseline rather than drift. Any change to it fires.
-    'standalone_apply': True,
-    'runtime_execution': False,   # NOT_RUN at freeze
-    'hypothesis_result': False,   # UNDETERMINED at freeze
-    'run_epoch_binding': False,   # docs/RUN-EPOCH.txt absent at freeze
-}
+# v4 handled four rows by hand and left a whole class uncovered: a row whose
+# derivation kind IS admissible, but whose predicate never ran. A declared
+# criterion_6 with no checker on disk, or a checker not wired into the gate,
+# was absorbed exactly as the hand-pinned rows had been - and a checker that
+# merely exited 0 closed the row outright. The rule is therefore stated once,
+# over every row that carries a closure signal, rather than per row.
+#
+# A signal means: a closing artifact is DECLARED for this row. It is a claim of
+# closure only - a declared failure is not a signal, because FAIL is a
+# legitimate terminal state that needs no predicate to be believed.
+#
+# FROZEN_SIGNAL is the baseline at the freeze. Drift is measured RELATIVE TO IT,
+# not against the bare presence of a claim: standalone_apply's three receipt
+# lines predate the freeze and are disclosed in the matrix as OPEN with a
+# close_artifact, so they are the baseline, not movement.
+CLOSABLE_ROWS = (
+    'standalone_apply', 'measurement_disabled_build', 'measurement_enabled_build',
+    'target_arm64_build', 'campaign_composition', 'timing_perturbation_sensitivity',
+    'functional_semantics_preservation', 'consumer_compatibility',
+    'runtime_execution', 'run_epoch_binding', 'hypothesis_result',
+)
+FROZEN_SIGNAL = {k: False for k in CLOSABLE_ROWS}
+FROZEN_SIGNAL['standalone_apply'] = True
 
 EXPECTED_BLOCKS = {
     'measurement_disabled_build': 'run_readiness',
@@ -127,12 +146,17 @@ CANONICAL_TEXT = {
         'independent predicate.',
     'freeze_semantics':
         'OPEN with no closing artifact declared is a valid unresolved state. '
-        'OPEN when a closing artifact appears is a stale contract and fails the '
-        'gate until an independent predicate is written and the derivation kind '
-        'is deliberately upgraded. PASS means the artifact was independently '
-        're-derived. FAIL means a contradiction, an invalid artifact, or an '
-        'invalid run. OPEN is not an absorption state: it asserts only that '
-        'nothing currently permits PASS to be re-derived.',
+        'A closing artifact that appears for a row the contract cannot '
+        're-derive is a stale contract and fails the gate, whether no '
+        'admissible derivation exists for that row or its predicate did not '
+        'run. PASS means the artifact was independently re-derived by a '
+        'predicate that can also reject. FAIL means a contradiction, an '
+        'invalid artifact, or an invalid run, and needs no predicate to be '
+        'believed. OPEN is not an absorption state: it asserts only that '
+        'nothing currently permits PASS to be re-derived. Drift is measured '
+        'relative to the frozen baseline, not to the bare presence of a claim: '
+        'a claim already declared and disclosed at the freeze is the baseline, '
+        'and only movement away from it is drift.',
 }
 
 ALLOWED_RUNTIME = {'NOT_RUN', 'VALID_RUN', 'INVALID_RUN'}
@@ -212,7 +236,7 @@ def consumer_fixtures() -> dict:
 def compute_states(root: Path):
     errors = []
     states = {k: 'FAIL' for k in REQUIRED_DIMENSIONS}
-    claims = {k: False for k in FROZEN_CLAIM}
+    signals = {k: False for k in CLOSABLE_ROWS}
     for rel in (PATCH_PATH, RECEIPT_PATH, VERIFIER_PATH):
         if not (root / rel).is_file():
             errors.append(f'missing required audit input: {rel.as_posix()}')
@@ -234,27 +258,71 @@ def compute_states(root: Path):
     # closing invariant a receipt line is not a derivation, so this can only be
     # OPEN until an apply is re-run against the pinned tree, or the receipt is
     # bound to a verifiable CI artifact.
-    claims['standalone_apply'] = all(
+    signals['standalone_apply'] = all(
         receipt.get(k) == 'PASS' for k in
         ('standalone_apply_to_pin', 'whitespace_error_all', 'diff_check'))
-    states['standalone_apply'] = 'OPEN' if claims['standalone_apply'] else 'FAIL'
-    states['measurement_disabled_build'] = state_from_receipt(receipt.get('build_measurement_disabled'))
-    states['measurement_enabled_build'] = state_from_receipt(receipt.get('build_measurement_enabled'))
-    states['target_arm64_build'] = state_from_receipt(receipt.get('criterion_5_arm64_build'))
-    states['campaign_composition'] = state_from_receipt(receipt.get('criterion_4_campaign_composition'))
+    states['standalone_apply'] = 'OPEN' if signals['standalone_apply'] else 'FAIL'
+    RECEIPT_ROWS = {
+        'measurement_disabled_build': 'build_measurement_disabled',
+        'measurement_enabled_build': 'build_measurement_enabled',
+        'target_arm64_build': 'criterion_5_arm64_build',
+        'campaign_composition': 'criterion_4_campaign_composition',
+        'timing_perturbation_sensitivity': 'timing_perturbation_sensitivity',
+    }
+    for row, key in RECEIPT_ROWS.items():
+        states[row] = state_from_receipt(receipt.get(key))
+        signals[row] = receipt.get(key) == 'PASS'
     # v1 promoted this on a receipt line alone, which is the exact
     # "claim is not proof" failure the matrix exists to prevent. It now needs an
     # executed checker as well; the receipt line alone can only keep it OPEN.
+    # v4 let this row close on a checker that exited 0, with no requirement that
+    # the checker could reject anything. `sys.exit(0)` was a valid closure. That
+    # is the same "a number that says so" failure the contract exists to
+    # prevent, and it is inconsistent with negative_controls, which asserts that
+    # this repository's checkers carry discriminating controls.
+    #
+    # Closing this row therefore needs, as with the consumer: the checker, an
+    # independent selftest, both wired into the gate, the predicate succeeding
+    # on the real tree, AND the predicate REJECTING a tree the reviewer breaks
+    # here. A functional-semantics checker that accepts an empty patch is not
+    # reading the patch.
     fsp = root / 'tools/check_functional_semantics.py'
+    fsp_test = root / 'tools/check_functional_semantics_selftest.py'
+    signals['functional_semantics_preservation'] = (
+        receipt.get('criterion_6_functional_semantics_preservation') == 'PASS')
     states['functional_semantics_preservation'] = 'OPEN'
-    if receipt.get('criterion_6_functional_semantics_preservation') == 'PASS':
-        if fsp.is_file() and all_tokens(verifier, ['functional_semantics']):
-            try:
-                proc = subprocess.run([sys.executable, str(fsp), '.'], cwd=str(root),
+    if signals['functional_semantics_preservation']:
+        if (fsp.is_file() and fsp_test.is_file() and
+                all_tokens(verifier, ['check_functional_semantics.py',
+                                      'check_functional_semantics_selftest.py'])):
+            def run_fsp(cwd):
+                return subprocess.run([sys.executable, str(fsp), '.'], cwd=str(cwd),
                                       capture_output=True, text=True, timeout=120)
+            try:
+                own = subprocess.run([sys.executable, str(fsp_test), 'selftest'],
+                                     cwd=str(root), capture_output=True,
+                                     text=True, timeout=120)
+                real = run_fsp(root)
+                ok = own.returncode == 0 and real.returncode == 0
+                if ok:
+                    # Reviewer-owned mutation: the checker must reject a tree
+                    # whose patch carries nothing to preserve semantics of.
+                    with tempfile.TemporaryDirectory() as td:
+                        broken = Path(td) / 'tree'
+                        shutil.copytree(root, broken, symlinks=True)
+                        (broken / PATCH_PATH).write_text('', encoding='utf-8')
+                        if run_fsp(broken).returncode == 0:
+                            errors.append(
+                                'functional_semantics_preservation: the checker '
+                                'accepted an empty patch, so it is not '
+                                'discriminating; a predicate that cannot reject '
+                                'cannot close a row')
+                            ok = False
                 states['functional_semantics_preservation'] = (
-                    'PASS' if proc.returncode == 0 else 'FAIL')
-            except Exception:
+                    'PASS' if ok else 'FAIL')
+            except Exception as exc:
+                errors.append(f'functional_semantics_preservation: the checker '
+                              f'could not be exercised: {exc}')
                 states['functional_semantics_preservation'] = 'OPEN'
 
     # Structural, not token presence: the event must appear AFTER the register
@@ -334,8 +402,6 @@ def compute_states(root: Path):
     # and the unmap. This is a timing hypothesis, so any added latency there can
     # bias a NEGATIVE result toward safe. It cannot manufacture a positive one.
     # Closing it needs a measured sensitivity result, not a source reading.
-    states['timing_perturbation_sensitivity'] = state_from_receipt(
-        receipt.get('timing_perturbation_sensitivity'))
 
     # Token presence proved only that the names exist. The identity must be
     # assigned at MAP and emitted by the shared emitter, so every stage carries
@@ -354,6 +420,9 @@ def compute_states(root: Path):
     # rejections it actually performs.
     consumer = root / 'tools/validate_r1_lifetime_trace.py'
     consumer_test = root / 'tools/validate_r1_lifetime_trace_selftest.py'
+    # The consumer appearing on disk is the closing artifact for this row, so a
+    # consumer added but never wired into the gate is drift, not silence.
+    signals['consumer_compatibility'] = consumer.is_file()
     REQUIRED_REJECTIONS = ('diag_build', 'req_mismatch', 'map_mismatch',
                            'dma_mismatch', 'missing_event', 'wrong_order',
                            'reset_epoch_mismatch')
@@ -445,7 +514,7 @@ def compute_states(root: Path):
     # VALID_RUN asserted in a text file is a declaration, not a derivation, so
     # it can only hold the row OPEN. An INVALID_RUN still fails, because a
     # self-declared failure needs no corroboration to be believed.
-    claims['runtime_execution'] = runtime_state == 'VALID_RUN'
+    signals['runtime_execution'] = runtime_state == 'VALID_RUN'
     states['runtime_execution'] = {'NOT_RUN': 'OPEN', 'VALID_RUN': 'OPEN',
                                    'INVALID_RUN': 'FAIL'}[runtime_state]
     # The result axis is never a gate failure. An undetermined hypothesis is an
@@ -459,7 +528,7 @@ def compute_states(root: Path):
     # determined outcome stays OPEN until an adjudicator derives it from the
     # trace. The consistency check below is kept because it still catches
     # incoherent pairs.
-    claims['hypothesis_result'] = hypothesis != 'UNDETERMINED'
+    signals['hypothesis_result'] = hypothesis != 'UNDETERMINED'
     if hypothesis == 'UNDETERMINED':
         states['hypothesis_result'] = 'OPEN'
     elif runtime_state != 'VALID_RUN':
@@ -493,7 +562,7 @@ def compute_states(root: Path):
             errors.append('run epoch kernel_commit is not the pinned kernel')
             states['run_epoch_binding'] = 'FAIL'
         else:
-            claims['run_epoch_binding'] = True
+            signals['run_epoch_binding'] = True
             states['run_epoch_binding'] = 'OPEN'
     elif runtime_state != 'NOT_RUN':
         errors.append('a run is declared but docs/RUN-EPOCH.txt is absent')
@@ -527,26 +596,32 @@ def compute_states(root: Path):
     # demoted to OPEN and reported as a checker defect, while a declaration of
     # INVALID/FAIL still fails, because a self-declared failure needs no
     # corroboration to be believed.
+    # A declaration_only row must never reach PASS. Distinct from the drift
+    # rule below: this one asks whether THIS CHECKER produced an uncorroborated
+    # PASS, which would be a defect here; drift asks whether the CONTRACT has
+    # fallen behind the evidence.
     for ident, kind in DERIVATION.items():
         if kind in DECLARATION_ONLY and states.get(ident) == 'PASS':
             errors.append(f'{ident}: uncorroborated PASS from {kind}')
             states[ident] = 'OPEN'
 
-    # Contract drift. A different question from the clamp above: the clamp asks
-    # whether a declaration_only row reached PASS, which would be a defect in
-    # this checker. This asks whether a closing artifact has been DECLARED for a
-    # row the contract still cannot re-derive, which is a defect in the
-    # contract. A drift toward failure is exempt, because FAIL is a legitimate
-    # terminal state and needs no predicate to be believed - only a claim of
-    # closure obliges the contract to catch up.
-    for ident, frozen in FROZEN_CLAIM.items():
-        if claims[ident] != frozen and states.get(ident) != 'FAIL':
-            errors.append(
-                f'{ident}: contract drift; a closing artifact is declared but '
-                f'no independent predicate exists to re-derive it. Write the '
-                f'predicate and upgrade its derivation kind, or withdraw the '
-                f'declaration. OPEN is not an absorption state.')
-            states[ident] = 'OPEN'
+    for ident in CLOSABLE_ROWS:
+        if not signals[ident] or FROZEN_SIGNAL[ident]:
+            continue
+        kind = DERIVATION[ident]
+        if kind in DECLARATION_ONLY:
+            why = (f'its derivation is {kind}, so no predicate in this contract '
+                   f'can re-derive it')
+        elif states[ident] == 'OPEN':
+            why = ('its predicate did not run: the checker is absent, not wired '
+                   'into the gate, or could not be exercised')
+        else:
+            continue   # an admissible predicate ran; its PASS or FAIL stands
+        errors.append(
+            f'{ident}: contract drift; a closing artifact is declared but '
+            f'{why}. Write the predicate and upgrade its derivation kind, or '
+            f'withdraw the declaration. OPEN is not an absorption state.')
+        states[ident] = 'OPEN'
     return states, errors
 
 
@@ -560,10 +635,12 @@ def validate_matrix(root: Path, matrix_path: Path = MATRIX_PATH):
     except Exception as exc:
         return [f'invalid matrix JSON: {exc}']
 
-    if data.get('schema_version') != 4:
-        errors.append(f"schema_version must be 4, got {data.get('schema_version')!r}")
-    if not isinstance(data.get('contract_id'), str) or not data['contract_id'].strip():
-        errors.append('contract_id must be a non-empty string')
+    if data.get('schema_version') != SCHEMA_VERSION:
+        errors.append(f'schema_version must be {SCHEMA_VERSION}, got '
+                      f"{data.get('schema_version')!r}")
+    if data.get('contract_id') != EXPECTED_CONTRACT_ID:
+        errors.append(f'contract_id must be {EXPECTED_CONTRACT_ID!r}, got '
+                      f"{data.get('contract_id')!r}")
     for key, text in CANONICAL_TEXT.items():
         if data.get(key) != text:
             errors.append(f'{key} does not match the canonical text held by the '
@@ -733,7 +810,8 @@ def fixture_matrix(states=None) -> dict:
     run_ok = rows_pass('run_readiness')
     evid_ok = run_ok and rows_pass('evidence_admissibility')
     neg_ok = evid_ok and rows_pass('negative_closure')
-    return {'schema_version': 4, 'contract_id': 'fixture-v4',
+    return {'schema_version': SCHEMA_VERSION,
+            'contract_id': EXPECTED_CONTRACT_ID,
             **CANONICAL_TEXT,
             'run_readiness': 'READY' if run_ok else 'BLOCKED',
             'evidence_admissibility': 'READY' if evid_ok else 'BLOCKED',
@@ -889,6 +967,18 @@ def selftest() -> int:
         p = r / MATRIX_PATH; d = json.loads(p.read_text())
         d['schema_version'] = 1; p.write_text(json.dumps(d))
     expect('v1 schema rejected', v1_schema, False)
+
+    # The version bump is load-bearing, not cosmetic: it is what lets a future
+    # artifact be attributed to the contract it was actually judged under.
+    def v4_schema(r):
+        p = r / MATRIX_PATH; d = json.loads(p.read_text())
+        d['schema_version'] = 4; p.write_text(json.dumps(d))
+    expect('a v4 matrix is rejected by the v5 checker', v4_schema, False)
+
+    def stale_contract_id(r):
+        p = r / MATRIX_PATH; d = json.loads(p.read_text())
+        d['contract_id'] = 'dwc2-r1a-closure-v4'; p.write_text(json.dumps(d))
+    expect('a v4 contract_id is rejected by the v5 checker', stale_contract_id, False)
 
     def v1_field(r):
         p = r / MATRIX_PATH; d = json.loads(p.read_text())
@@ -1199,6 +1289,68 @@ def selftest() -> int:
         d.pop('freeze_semantics', None); p.write_text(json.dumps(d))
     expect('the freeze semantics may not be dropped from the matrix',
            drop_freeze_semantics, False)
+
+    # The class v4 missed entirely: a row whose derivation kind IS admissible
+    # but whose predicate never ran. All three shapes, plus the positive
+    # control, so a rule that rejected everything would fail here.
+    def declare_c6(extra=None):
+        def m(r):
+            rp = r / RECEIPT_PATH
+            rp.write_text(rp.read_text() +
+                          'criterion_6_functional_semantics_preservation=PASS\n')
+            if extra:
+                extra(r)
+        return m
+
+    def fsp_scripts(body):
+        def m(r):
+            (r / 'tools/check_functional_semantics.py').write_text(body)
+            (r / 'tools/check_functional_semantics_selftest.py').write_text(
+                'import sys; sys.exit(0)\n')
+        return m
+
+    def fsp_wired(body):
+        def m(r):
+            fsp_scripts(body)(r)
+            v = r / VERIFIER_PATH
+            v.write_text(v.read_text() + 'check_functional_semantics.py\n'
+                                         'check_functional_semantics_selftest.py\n')
+        return m
+
+    READS_PATCH = ("import sys, pathlib\n"
+                   "p = pathlib.Path('r1a-device/instrumentation/"
+                   "R1A-RESET-INSTRUMENTATION-v5.patch')\n"
+                   "sys.exit(0 if p.read_text().strip() else 1)\n")
+
+    expect_computed('a declared criterion_6 with no checker is drift',
+                    declare_c6(), 'functional_semantics_preservation',
+                    'OPEN', True, defect='contract drift')
+    expect_computed('a checker present but unwired is drift',
+                    declare_c6(fsp_scripts(READS_PATCH)),
+                    'functional_semantics_preservation', 'OPEN', True,
+                    defect='contract drift')
+    # Not drift but FAIL: the predicate DID run, and could not reject.
+    expect_computed('a checker that only exits 0 cannot close the row',
+                    declare_c6(fsp_wired('import sys; sys.exit(0)\n')),
+                    'functional_semantics_preservation', 'FAIL', False,
+                    defect='contract drift')
+    expect_computed('a bare exit-0 checker is reported as not discriminating',
+                    declare_c6(fsp_wired('import sys; sys.exit(0)\n')),
+                    'functional_semantics_preservation', 'FAIL', True,
+                    defect='not discriminating')
+    # The positive control: a predicate that can reject does close the row.
+    expect_computed('a discriminating checker closes the row cleanly',
+                    declare_c6(fsp_wired(READS_PATCH)),
+                    'functional_semantics_preservation', 'PASS', False,
+                    defect='contract drift')
+
+    def consumer_unwired(r):
+        (r / 'tools/validate_r1_lifetime_trace.py').write_text('import sys; sys.exit(0)\n')
+        (r / 'tools/validate_r1_lifetime_trace_selftest.py').write_text(
+            'import sys; sys.exit(0)\n')
+    expect_computed('a consumer added but never wired into the gate is drift',
+                    consumer_unwired, 'consumer_compatibility', 'OPEN', True,
+                    defect='contract drift')
 
     def unknown_derivation_kind(r):
         p = r / MATRIX_PATH; d = json.loads(p.read_text())
