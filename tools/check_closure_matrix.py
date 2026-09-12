@@ -72,6 +72,35 @@ DERIVATION = {
 }
 DECLARATION_ONLY = {'declaration_only', 'partial_binding'}
 
+# The freeze, made mechanical.
+#
+#   OPEN, no closing artifact declared  -> valid unresolved state, gate green
+#   OPEN, a closing artifact appears    -> the contract is stale, gate FAIL
+#   PASS                                -> artifact independently re-derived
+#   FAIL                                -> contradiction, invalid artifact, invalid run
+#
+# OPEN is not an absorption state. It says only: nothing here currently permits
+# PASS to be re-derived. When evidence arrives that WOULD close a row but no
+# predicate exists yet to check it, the honest outcome is noise, not silence -
+# otherwise an evidence-state transition happens that the contract does not
+# represent, and the repository reads green while a researcher assumes it is
+# merely "not updated yet".
+#
+# Five declaration_only rows get this for free: their declarations run through
+# state_from_receipt(), so a closing claim computes PASS and the clamp below
+# fires. The four rows here do not - each is pinned to OPEN by hand, which
+# swallowed the claim silently. Their claim signal is therefore explicit, and
+# frozen says whether that claim was already present, and disclosed, at v4.
+FROZEN_CLAIM = {
+    # Three receipt lines assert the apply succeeded. That claim predates the
+    # freeze and is disclosed in the matrix as OPEN with a close_artifact, so it
+    # is the baseline rather than drift. Any change to it fires.
+    'standalone_apply': True,
+    'runtime_execution': False,   # NOT_RUN at freeze
+    'hypothesis_result': False,   # UNDETERMINED at freeze
+    'run_epoch_binding': False,   # docs/RUN-EPOCH.txt absent at freeze
+}
+
 EXPECTED_BLOCKS = {
     'measurement_disabled_build': 'run_readiness',
     'measurement_enabled_build': 'run_readiness',
@@ -86,6 +115,26 @@ EXPECTED_BLOCKS = {
     'run_epoch_binding': 'evidence_admissibility',
     'timing_perturbation_sensitivity': 'negative_closure',
 }
+# The matrix carried a closing_invariant string that nothing read, which is the
+# same defect as the unread derivation field: prose asserting a property no
+# control measures. Either could have been deleted or rewritten to say the
+# opposite and the gate would have stayed green. The canonical text lives here
+# and the matrix must reproduce it exactly.
+CANONICAL_TEXT = {
+    'closing_invariant':
+        'No PASS may rest solely on a state file, a receipt=PASS line, or a '
+        'non-empty metadata field. Every PASS ends in an artifact plus an '
+        'independent predicate.',
+    'freeze_semantics':
+        'OPEN with no closing artifact declared is a valid unresolved state. '
+        'OPEN when a closing artifact appears is a stale contract and fails the '
+        'gate until an independent predicate is written and the derivation kind '
+        'is deliberately upgraded. PASS means the artifact was independently '
+        're-derived. FAIL means a contradiction, an invalid artifact, or an '
+        'invalid run. OPEN is not an absorption state: it asserts only that '
+        'nothing currently permits PASS to be re-derived.',
+}
+
 ALLOWED_RUNTIME = {'NOT_RUN', 'VALID_RUN', 'INVALID_RUN'}
 ALLOWED_HYPOTHESIS = {'UNDETERMINED', 'PROVEN', 'DISPROVEN', 'CONFIG_SCOPED_NEGATIVE'}
 ALLOWED_REVIEW_STATES = {'PASS', 'OPEN', 'FAIL'}
@@ -163,6 +212,7 @@ def consumer_fixtures() -> dict:
 def compute_states(root: Path):
     errors = []
     states = {k: 'FAIL' for k in REQUIRED_DIMENSIONS}
+    claims = {k: False for k in FROZEN_CLAIM}
     for rel in (PATCH_PATH, RECEIPT_PATH, VERIFIER_PATH):
         if not (root / rel).is_file():
             errors.append(f'missing required audit input: {rel.as_posix()}')
@@ -184,9 +234,10 @@ def compute_states(root: Path):
     # closing invariant a receipt line is not a derivation, so this can only be
     # OPEN until an apply is re-run against the pinned tree, or the receipt is
     # bound to a verifiable CI artifact.
-    states['standalone_apply'] = 'OPEN' if all(
+    claims['standalone_apply'] = all(
         receipt.get(k) == 'PASS' for k in
-        ('standalone_apply_to_pin', 'whitespace_error_all', 'diff_check')) else 'FAIL'
+        ('standalone_apply_to_pin', 'whitespace_error_all', 'diff_check'))
+    states['standalone_apply'] = 'OPEN' if claims['standalone_apply'] else 'FAIL'
     states['measurement_disabled_build'] = state_from_receipt(receipt.get('build_measurement_disabled'))
     states['measurement_enabled_build'] = state_from_receipt(receipt.get('build_measurement_enabled'))
     states['target_arm64_build'] = state_from_receipt(receipt.get('criterion_5_arm64_build'))
@@ -394,6 +445,7 @@ def compute_states(root: Path):
     # VALID_RUN asserted in a text file is a declaration, not a derivation, so
     # it can only hold the row OPEN. An INVALID_RUN still fails, because a
     # self-declared failure needs no corroboration to be believed.
+    claims['runtime_execution'] = runtime_state == 'VALID_RUN'
     states['runtime_execution'] = {'NOT_RUN': 'OPEN', 'VALID_RUN': 'OPEN',
                                    'INVALID_RUN': 'FAIL'}[runtime_state]
     # The result axis is never a gate failure. An undetermined hypothesis is an
@@ -407,6 +459,7 @@ def compute_states(root: Path):
     # determined outcome stays OPEN until an adjudicator derives it from the
     # trace. The consistency check below is kept because it still catches
     # incoherent pairs.
+    claims['hypothesis_result'] = hypothesis != 'UNDETERMINED'
     if hypothesis == 'UNDETERMINED':
         states['hypothesis_result'] = 'OPEN'
     elif runtime_state != 'VALID_RUN':
@@ -440,6 +493,7 @@ def compute_states(root: Path):
             errors.append('run epoch kernel_commit is not the pinned kernel')
             states['run_epoch_binding'] = 'FAIL'
         else:
+            claims['run_epoch_binding'] = True
             states['run_epoch_binding'] = 'OPEN'
     elif runtime_state != 'NOT_RUN':
         errors.append('a run is declared but docs/RUN-EPOCH.txt is absent')
@@ -477,6 +531,22 @@ def compute_states(root: Path):
         if kind in DECLARATION_ONLY and states.get(ident) == 'PASS':
             errors.append(f'{ident}: uncorroborated PASS from {kind}')
             states[ident] = 'OPEN'
+
+    # Contract drift. A different question from the clamp above: the clamp asks
+    # whether a declaration_only row reached PASS, which would be a defect in
+    # this checker. This asks whether a closing artifact has been DECLARED for a
+    # row the contract still cannot re-derive, which is a defect in the
+    # contract. A drift toward failure is exempt, because FAIL is a legitimate
+    # terminal state and needs no predicate to be believed - only a claim of
+    # closure obliges the contract to catch up.
+    for ident, frozen in FROZEN_CLAIM.items():
+        if claims[ident] != frozen and states.get(ident) != 'FAIL':
+            errors.append(
+                f'{ident}: contract drift; a closing artifact is declared but '
+                f'no independent predicate exists to re-derive it. Write the '
+                f'predicate and upgrade its derivation kind, or withdraw the '
+                f'declaration. OPEN is not an absorption state.')
+            states[ident] = 'OPEN'
     return states, errors
 
 
@@ -494,6 +564,10 @@ def validate_matrix(root: Path, matrix_path: Path = MATRIX_PATH):
         errors.append(f"schema_version must be 4, got {data.get('schema_version')!r}")
     if not isinstance(data.get('contract_id'), str) or not data['contract_id'].strip():
         errors.append('contract_id must be a non-empty string')
+    for key, text in CANONICAL_TEXT.items():
+        if data.get(key) != text:
+            errors.append(f'{key} does not match the canonical text held by the '
+                          f'checker; the contract is stated in one place only')
 
     dims = data.get('dimensions')
     if not isinstance(dims, list):
@@ -660,6 +734,7 @@ def fixture_matrix(states=None) -> dict:
     evid_ok = run_ok and rows_pass('evidence_admissibility')
     neg_ok = evid_ok and rows_pass('negative_closure')
     return {'schema_version': 4, 'contract_id': 'fixture-v4',
+            **CANONICAL_TEXT,
             'run_readiness': 'READY' if run_ok else 'BLOCKED',
             'evidence_admissibility': 'READY' if evid_ok else 'BLOCKED',
             'negative_closure_admissibility': 'READY' if neg_ok else 'BLOCKED',
@@ -769,6 +844,29 @@ def selftest() -> int:
     failures = 0
     ran = 0
 
+    # Some properties belong to the COMPUTED layer and are tested there.
+    # Routing the clamp through validate_matrix() would not have measured it:
+    # that layer already rejects a DECLARATION_ONLY row declaring PASS, so a
+    # fixture editing both the receipt and the matrix fails either way and
+    # discriminates nothing. The first version of that control did exactly that
+    # and was replaced after it survived the mutation with the clamp removed.
+    def expect_computed(name, mutator, ident, want_state, want_defect,
+                        defect='uncorroborated PASS'):
+        nonlocal failures, ran
+        ran += 1
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_fixture(root)
+            mutator(root)
+            states, errs = compute_states(root)
+            got = states.get(ident)
+            seen = any(e.startswith(f'{ident}: ') and defect in e for e in errs)
+            if got != want_state or seen != want_defect:
+                print(f'SELFTEST FAIL: {name}: expected {want_state}/'
+                      f'defect={want_defect}, got {got}/defect={seen}',
+                      file=sys.stderr)
+                failures += 1
+
     def expect(name, mutator, should_pass):
         nonlocal failures, ran
         ran += 1
@@ -841,28 +939,30 @@ def selftest() -> int:
         p.write_text(json.dumps(d))
     expect('receipt line alone cannot prove semantics', receipt_only_semantics, False)
 
-    # BUG 3 of v1: a valid run had no PASS path.
-    def valid_run_reaches_pass(r):
+    # BUG 3 of v1: a valid run had no PASS path. v4 gave it one by pinning the
+    # row to OPEN, which closed that bug and opened another: the declaration of
+    # a completed run was absorbed and the gate stayed green. Under the freeze
+    # semantics the row still does not read PASS, but the gate now says so.
+    def declare_valid_run(r):
         (r / 'docs/RUNTIME-STATE.txt').write_text(
             'runtime_execution=VALID_RUN\nhypothesis_result=DISPROVEN\n')
         write_epoch(r)
-        p = r / MATRIX_PATH
-        d = fixture_matrix()
-        p.write_text(json.dumps(d))
-    expect('a declared VALID_RUN alone does not close the execution row',
-           valid_run_reaches_pass, True)
+        (r / MATRIX_PATH).write_text(json.dumps(fixture_matrix()))
+    expect('a declared VALID_RUN breaks the gate as a stale contract',
+           declare_valid_run, False)
+    expect_computed('a declared VALID_RUN still does not read PASS',
+                    declare_valid_run, 'runtime_execution', 'OPEN', True,
+                    defect='contract drift')
 
+    # An invalid run needs no predicate to be believed, so it stays a plain
+    # FAIL rather than becoming drift.
     def invalid_run_is_fail(r):
         (r / 'docs/RUNTIME-STATE.txt').write_text(
             'runtime_execution=INVALID_RUN\nhypothesis_result=UNDETERMINED\n')
         write_epoch(r)
-        p = r / MATRIX_PATH
-        d = fixture_matrix({'runtime_execution': 'FAIL'})
-        for x in d['dimensions']:
-            if x['id'] == 'runtime_execution':
-                x['blocker'] = 'invalid run'
-        p.write_text(json.dumps(d))
-    expect('an invalid run is a FAIL', invalid_run_is_fail, True)
+    expect_computed('an invalid run is a FAIL, not contract drift',
+                    invalid_run_is_fail, 'runtime_execution', 'FAIL', False,
+                    defect='contract drift')
 
     # Circularity guard.
     def runtime_blocks_run_readiness(r):
@@ -996,15 +1096,16 @@ def selftest() -> int:
     expect('a declaration-only row may not read PASS',
            declaration_only_cannot_pass, False)
 
-    def swapping_the_result_word_changes_nothing(r):
+    def swap_the_result_word(r):
         write_epoch(r)
         (r / 'docs/RUNTIME-STATE.txt').write_text(
             'runtime_execution=VALID_RUN\nhypothesis_result=PROVEN\n')
-        p = r / MATRIX_PATH
-        d = fixture_matrix()
-        p.write_text(json.dumps(d))
-    expect('PROVEN in a text file does not close the result row',
-           swapping_the_result_word_changes_nothing, True)
+        (r / MATRIX_PATH).write_text(json.dumps(fixture_matrix()))
+    expect_computed('PROVEN in a text file does not close the result row',
+                    swap_the_result_word, 'hypothesis_result', 'OPEN', True,
+                    defect='contract drift')
+    expect('PROVEN in a text file is loud, not absorbed',
+           swap_the_result_word, False)
 
     def epoch_placeholders_do_not_pass(r):
         write_epoch(r)
@@ -1038,29 +1139,6 @@ def selftest() -> int:
         p.write_text(json.dumps(d))
     expect('a row must declare a derivation kind', derivation_absent, False)
 
-    # The clamp is a property of the COMPUTED layer, so it is tested there.
-    # Routing this through validate_matrix() would not have measured it: the
-    # matrix-layer check already rejects a DECLARATION_ONLY row that declares
-    # PASS, so a fixture that edits both the receipt and the matrix fails with
-    # or without the clamp and discriminates nothing. The question the clamp
-    # answers is narrower and is asked directly - can a receipt word alone make
-    # compute_states() read PASS for a row whose PASS rests on a declaration.
-    def expect_computed(name, mutator, ident, want_state, want_defect):
-        nonlocal failures, ran
-        ran += 1
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_fixture(root)
-            mutator(root)
-            states, errs = compute_states(root)
-            got = states.get(ident)
-            defect = any(f'{ident}: uncorroborated PASS' in e for e in errs)
-            if got != want_state or defect != want_defect:
-                print(f'SELFTEST FAIL: {name}: expected {want_state}/'
-                      f'defect={want_defect}, got {got}/defect={defect}',
-                      file=sys.stderr)
-                failures += 1
-
     def receipt_says(value):
         def m(r):
             rp = r / RECEIPT_PATH
@@ -1083,6 +1161,44 @@ def selftest() -> int:
     # The clamp must not move rows that earned their PASS.
     expect_computed('a derived row keeps its PASS under the clamp',
                     lambda r: None, 'event_ordering', 'PASS', False)
+
+    # The remaining rows of the freeze table, pinned one by one.
+    # A closing artifact appearing for a row bound on 2 of 9 fields is loud.
+    expect_computed('an epoch file appearing is a claim the contract cannot '
+                    'yet re-derive',
+                    lambda r: (write_epoch(r), (r / 'docs/RUNTIME-STATE.txt')
+                               .write_text('runtime_execution=VALID_RUN\n'
+                                           'hypothesis_result=UNDETERMINED\n')),
+                    'run_epoch_binding', 'OPEN', True, defect='contract drift')
+
+    # The frozen baseline is a baseline, not an exemption: standalone_apply's
+    # three receipt lines predate the freeze and stay quiet, but withdrawing
+    # them is a contradiction, which is a FAIL and not drift.
+    expect_computed('a claim disclosed at freeze does not fire drift',
+                    lambda r: None, 'standalone_apply', 'OPEN', False,
+                    defect='contract drift')
+
+    def withdraw_apply_claim(r):
+        rp = r / RECEIPT_PATH
+        rp.write_text(rp.read_text().replace('diff_check=PASS',
+                                             'diff_check=FAILED'))
+    expect_computed('withdrawing a frozen claim is a FAIL, not drift',
+                    withdraw_apply_claim, 'standalone_apply', 'FAIL', False,
+                    defect='contract drift')
+
+    def rewrite_invariant(r):
+        p = r / MATRIX_PATH; d = json.loads(p.read_text())
+        d['closing_invariant'] = d['closing_invariant'].replace(
+            'No PASS may rest solely', 'A PASS may rest solely')
+        p.write_text(json.dumps(d))
+    expect('the closing invariant may not be rewritten in the matrix',
+           rewrite_invariant, False)
+
+    def drop_freeze_semantics(r):
+        p = r / MATRIX_PATH; d = json.loads(p.read_text())
+        d.pop('freeze_semantics', None); p.write_text(json.dumps(d))
+    expect('the freeze semantics may not be dropped from the matrix',
+           drop_freeze_semantics, False)
 
     def unknown_derivation_kind(r):
         p = r / MATRIX_PATH; d = json.loads(p.read_text())

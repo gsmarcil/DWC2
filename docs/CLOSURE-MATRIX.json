@@ -2,6 +2,7 @@
   "schema_version": 4,
   "contract_id": "dwc2-r1a-closure-v4",
   "closing_invariant": "No PASS may rest solely on a state file, a receipt=PASS line, or a non-empty metadata field. Every PASS ends in an artifact plus an independent predicate.",
+  "freeze_semantics": "OPEN with no closing artifact declared is a valid unresolved state. OPEN when a closing artifact appears is a stale contract and fails the gate until an independent predicate is written and the derivation kind is deliberately upgraded. PASS means the artifact was independently re-derived. FAIL means a contradiction, an invalid artifact, or an invalid run. OPEN is not an absorption state: it asserts only that nothing currently permits PASS to be re-derived.",
   "run_readiness": "BLOCKED",
   "evidence_admissibility": "BLOCKED",
   "negative_closure_admissibility": "BLOCKED",
