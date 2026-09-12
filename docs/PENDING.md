@@ -266,3 +266,36 @@ Read the commit at `fuchsia.googlesource.com` or at Gerrit review 1382006 from
 an unblocked host and upgrade the status line to `ORIGINAL_SOURCE_VERIFIED`. A
 third-party mirror is the weakest acceptable provenance for a quotation this
 load-bearing.
+
+## Instrumentation is gated, and v4 is not yet admissible
+
+`r1a-device/instrumentation/APPLY-GATE.md` holds the current verdict.
+
+```text
+v3   REJECT / DO NOT RUN     its own receipt says superseded: UNMAP_DONE may
+                             read mapping-derived scalars after U
+v4   NEEDS_FIX               applies and builds against the pin, but cannot
+                             yet produce admissible evidence
+```
+
+One of v4's defects deserves repeating here, because it would waste a campaign
+rather than fail it visibly. The observer performs three MMIO reads at each of
+`EPDIS_ASSERT`, `WAIT_RETURN` and `PRE_U`, which are the three points inside the
+window between the stop attempt and the unmap. That is nine MMIO reads added to
+the exact interval the hypothesis says is too short.
+
+The bias is one-directional:
+
+```text
+the instrument can turn a racing execution into an apparently safe one
+the instrument cannot create a race that is not there
+```
+
+So a positive result from v4 would still count, and a **negative result would
+not**. `D_issue` must not be closed negatively using any build that carries
+register snapshots between the timeout and the unmap.
+
+P0 also still requires `observer ABI=9`, `snapshot_atomic=1` and `lost=0`, which
+v4 does not supply on its own, and the CI evidence covers v4 standalone rather
+than the composition that would actually be booted. That composition question
+must be settled before a campaign kernel is built.
