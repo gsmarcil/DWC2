@@ -2,8 +2,57 @@
 
 ```text
 R1A-RESET-INSTRUMENTATION-v3.patch   REJECT / DO NOT RUN
-R1A-RESET-INSTRUMENTATION-v4.patch   NEEDS_FIX / DO NOT APPLY FOR EVIDENCE
+R1A-RESET-INSTRUMENTATION-v4.patch   SUPERSEDED BY v5
+R1A-RESET-INSTRUMENTATION-v5.patch   NEEDS_BUILD_VERIFICATION
 ```
+
+## v5 status
+
+v5 exists and clears criteria 1 to 3. It does **not** clear 4 and 5, so it is
+still not admissible for the campaign.
+
+```text
+patch_sha256  c2b0884c9a2753853ed2c19b3a25f49fdced159585e5ba045f4f034f354c509d
+
+criterion 1  EPDIS event after the write, renamed EPDIS_WRITTEN     PASS
+criterion 2  zero MMIO between the stop timeout and the unmap in
+             the decisive build                                     PASS
+criterion 3  PROGRAMMED split into DMA_ADDR_WRITTEN and EP_ARMED    PASS
+
+standalone apply to the pin, whitespace, diff --check                PASS
+
+criterion 4  campaign composition built and tested as one kernel    UNVERIFIED
+criterion 5  arm64 build with measurement off and on                UNVERIFIED
+```
+
+Criteria 4 and 5 were not attempted rather than attempted and passed. The
+environment that produced v5 holds three pinned driver files and no kernel tree
+or cross toolchain, so no build of any kind was run. The receipt records this as
+`NOT_RUN`, not as a pass.
+
+### How criterion 2 is met, and how that is checked
+
+The three register reads are now inside `#ifdef CONFIG_USB_DWC2_R1_MEASURE_DIAG`,
+a separate Kconfig defaulting to `n`. In the campaign build they are not
+compiled at all, so the property is a fact about the binary rather than about a
+runtime flag someone might set wrongly.
+
+Verified by stripping the diagnostic region from the patched source and counting
+`dwc2_readl` calls in the window:
+
+```text
+MMIO reads in ep_stop_xfr after the EPDIS write   0
+MMIO reads between PRE_U and the unmap            0
+same reads present in the diagnostic build        yes
+```
+
+Every record also carries `DWC2_R1_FLAG_DIAG_BUILD` (flags bit 7) when the
+diagnostic build produced it. This is load-bearing: without it a diagnostic
+trace and a decisive trace are indistinguishable in the artifact, which is the
+same discrimination failure documented in `docs/EVIDENCE-DISCRIMINATION.md`. A
+consumer closing the hypothesis negatively must reject any trace with that bit
+set.
+
 
 Every finding below was re-read out of the patch files themselves. Line numbers
 refer to the patch, not to the kernel.
