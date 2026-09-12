@@ -460,6 +460,23 @@ def compute_states(root: Path):
     # required checks are off, and no ruleset is configured, so the gate is not
     # enforced by the host today. Not campaign-blocking, but not a blank either.
     states['continuous_enforcement'] = 'OPEN'
+
+    # The closing invariant applied to the computed layer, generically.
+    # v4 enforced it only where the matrix declared PASS, and patched the
+    # computed side one row at a time (standalone_apply pinned to OPEN,
+    # hypothesis_result pinned to OPEN). Rows such as measurement_enabled_build
+    # still reached PASS internally from state_from_receipt(), so editing one
+    # word in a receipt moved a row the invariant says a receipt cannot move.
+    # One rule instead of three special cases: no declaration_only row may
+    # leave this function reading PASS, whatever produced it. The asymmetry is
+    # deliberate and preserved - an unverified declaration of success is
+    # demoted to OPEN and reported as a checker defect, while a declaration of
+    # INVALID/FAIL still fails, because a self-declared failure needs no
+    # corroboration to be believed.
+    for ident, kind in DERIVATION.items():
+        if kind in DECLARATION_ONLY and states.get(ident) == 'PASS':
+            errors.append(f'{ident}: uncorroborated PASS from {kind}')
+            states[ident] = 'OPEN'
     return states, errors
 
 
@@ -528,6 +545,16 @@ def validate_matrix(root: Path, matrix_path: Path = MATRIX_PATH):
                 elif not (root / src).exists():
                     errors.append(f'{ident}: source does not exist: {src}')
         kind = DERIVATION.get(ident)
+        # The matrix carried a derivation field that nothing read. A row could
+        # declare standalone_apply.derivation = structural_predicate while the
+        # checker knew it was declaration_only, and the gate stayed green: the
+        # document said the PASS was earned, and no control compared the claim
+        # to the policy. Policy lives in DERIVATION; the matrix must agree.
+        declared_kind = dim.get('derivation')
+        if declared_kind != kind:
+            errors.append(
+                f'{ident}: matrix derivation {declared_kind!r} '
+                f'!= checker derivation {kind!r}')
         if kind is None:
             errors.append(f'{ident}: no derivation kind declared')
         elif declared == 'PASS' and kind in DECLARATION_ONLY:
@@ -617,7 +644,8 @@ def fixture_matrix(states=None) -> dict:
     for ident in REQUIRED_DIMENSIONS:
         state = base[ident]
         dim = {'id': ident, 'review_state': state, 'evidence_state': 'fixture',
-               'blocks': BLOCKS.get(ident, 'none'), 'sources': ['STATUS.md']}
+               'blocks': BLOCKS.get(ident, 'none'), 'sources': ['STATUS.md'],
+               'derivation': DERIVATION.get(ident)}
         if state == 'OPEN':
             dim['close_artifact'] = 'fixture close artifact'
         if state == 'FAIL':
@@ -991,6 +1019,70 @@ def selftest() -> int:
         p.write_text(json.dumps(d))
     expect('partially bound epoch fields may not read PASS',
            epoch_placeholders_do_not_pass, False)
+
+    # v4 wrote `derivation` into the matrix and never read it back.
+    def derivation_relabelled(r):
+        p = r / MATRIX_PATH; d = json.loads(p.read_text())
+        for x in d['dimensions']:
+            if x['id'] == 'standalone_apply':
+                x['derivation'] = 'structural_predicate'
+        p.write_text(json.dumps(d))
+    expect('a row may not relabel its own derivation kind',
+           derivation_relabelled, False)
+
+    def derivation_absent(r):
+        p = r / MATRIX_PATH; d = json.loads(p.read_text())
+        for x in d['dimensions']:
+            if x['id'] == 'measurement_enabled_build':
+                x.pop('derivation', None)
+        p.write_text(json.dumps(d))
+    expect('a row must declare a derivation kind', derivation_absent, False)
+
+    # The clamp is a property of the COMPUTED layer, so it is tested there.
+    # Routing this through validate_matrix() would not have measured it: the
+    # matrix-layer check already rejects a DECLARATION_ONLY row that declares
+    # PASS, so a fixture that edits both the receipt and the matrix fails with
+    # or without the clamp and discriminates nothing. The question the clamp
+    # answers is narrower and is asked directly - can a receipt word alone make
+    # compute_states() read PASS for a row whose PASS rests on a declaration.
+    def expect_computed(name, mutator, ident, want_state, want_defect):
+        nonlocal failures, ran
+        ran += 1
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_fixture(root)
+            mutator(root)
+            states, errs = compute_states(root)
+            got = states.get(ident)
+            defect = any(f'{ident}: uncorroborated PASS' in e for e in errs)
+            if got != want_state or defect != want_defect:
+                print(f'SELFTEST FAIL: {name}: expected {want_state}/'
+                      f'defect={want_defect}, got {got}/defect={defect}',
+                      file=sys.stderr)
+                failures += 1
+
+    def receipt_says(value):
+        def m(r):
+            rp = r / RECEIPT_PATH
+            rp.write_text(rp.read_text().replace(
+                'build_measurement_enabled=NOT_RUN',
+                f'build_measurement_enabled={value}'))
+        return m
+
+    expect_computed('a receipt word alone may not compute PASS for a '
+                    'declaration-only build row',
+                    receipt_says('PASS'), 'measurement_enabled_build',
+                    'OPEN', True)
+
+    # The other half of the asymmetry, and the guard against an over-broad
+    # clamp: an unverified success is demoted, an unverified failure stands.
+    expect_computed('a declared build failure is still a FAIL, not clamped',
+                    receipt_says('FAILED'), 'measurement_enabled_build',
+                    'FAIL', False)
+
+    # The clamp must not move rows that earned their PASS.
+    expect_computed('a derived row keeps its PASS under the clamp',
+                    lambda r: None, 'event_ordering', 'PASS', False)
 
     def unknown_derivation_kind(r):
         p = r / MATRIX_PATH; d = json.loads(p.read_text())
