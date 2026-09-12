@@ -278,6 +278,34 @@ do
     rm -f "$ctl_tmp"
 done
 
+# 6b. Complete duplicate census.
+#
+# The pinned baseline/check_duplicates.py can only confirm the pairs
+# baseline/DUPLICATES.txt already lists, and is rooted inside baseline/ so it
+# cannot see cross-tree identity. Four identical groups were invisible to it,
+# including two build-log pairs and the cross-architecture ABI dumps. See
+# docs/EVIDENCE-DISCRIMINATION.md for what each costs.
+for spec in \
+    'duplicate_census_selftest:selftest' \
+    'duplicate_census:.'
+do
+    label=${spec%%:*}
+    arg=${spec#*:}
+    if [ ! -f tools/check_duplicates_full.py ]; then
+        failmsg "$label"
+        printf '  missing: tools/check_duplicates_full.py\n' >&2
+        continue
+    fi
+    dup_tmp=${TMPDIR:-/tmp}/dwc2-$label.$$
+    if python3 tools/check_duplicates_full.py "$arg" >"$dup_tmp" 2>&1; then
+        pass "$label"
+    else
+        failmsg "$label"
+        sed 's/^/  /' "$dup_tmp" >&2
+    fi
+    rm -f "$dup_tmp"
+done
+
 # 7. Status-document drift guard.
 #
 # Freeze the verdict of the evidence checks (1-6) before the guard runs.  The

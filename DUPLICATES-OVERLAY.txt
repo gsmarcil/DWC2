@@ -1,0 +1,33 @@
+# Duplicate declarations outside the authenticated tree.
+#
+# baseline/DUPLICATES.txt is pinned inside the authenticated import and cannot
+# be extended without editing authenticated bytes and regenerating SHA256SUMS,
+# which is exactly the laundering that verify_archive_tracking.py exists to
+# catch. Groups discovered outside that declaration are recorded here instead.
+#
+# A declaration here means "this identity is known and accounted for". It does
+# NOT mean the identity is harmless. Read docs/EVIDENCE-DISCRIMINATION.md for
+# what each of these costs the evidence base.
+#
+# canonical | duplicate(s)
+
+# Same source file shipped in the canonical tree and inside the import.
+# Benign: one artifact, two locations, no evidentiary claim rests on them
+# being distinct.
+baseline/host/r1a_host.c | r1a-host/r1a_host.c
+
+# The v632-structural build logs are byte-identical to the v631 logs.
+# Each log is six lines of generic make output carrying no version marker,
+# so it cannot evidence WHICH source was built. Identity is consistent both
+# with an honest rebuild in the same directory and with a copy, and the
+# artifact cannot distinguish them. See EVIDENCE-DISCRIMINATION.md.
+baseline/kernel-r3/evidence/build-v631-arm-n.log | baseline/kernel-r3/evidence/v632-structural/build-v632-arm-n.log
+baseline/kernel-r3/evidence/build-v631-arm-y.log | baseline/kernel-r3/evidence/v632-structural/build-v632-arm-y.log
+
+# The two cross-architecture ABI layout dumps are one artifact.
+# Identity here is the INTENDED result: the record struct is fixed-width with
+# no holes, so independently generated dumps should match, and
+# VERIFY_v6.3.1.sh asserts exactly that. But neither file records the
+# architecture it was produced on, so the pair cannot demonstrate that two
+# independent generations occurred. See EVIDENCE-DISCRIMINATION.md.
+baseline/kernel-r3/evidence/abi-layout-arm32.txt | baseline/kernel-r3/evidence/abi-layout-x86_64.txt
