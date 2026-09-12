@@ -1,6 +1,7 @@
 {
-  "schema_version": 3,
-  "contract_id": "dwc2-r1a-closure-v3",
+  "schema_version": 4,
+  "contract_id": "dwc2-r1a-closure-v4",
+  "closing_invariant": "No PASS may rest solely on a state file, a receipt=PASS line, or a non-empty metadata field. Every PASS ends in an artifact plus an independent predicate.",
   "run_readiness": "BLOCKED",
   "evidence_admissibility": "BLOCKED",
   "negative_closure_admissibility": "BLOCKED",
@@ -12,16 +13,19 @@
       "blocks": "none",
       "sources": [
         "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.RECEIPT.txt"
-      ]
+      ],
+      "derivation": "digest_recomputed"
     },
     {
       "id": "standalone_apply",
-      "review_state": "PASS",
-      "evidence_state": "applies to the pin; whitespace and diff --check clean",
+      "review_state": "OPEN",
+      "evidence_state": "receipt lines only; no apply re-executed here",
       "blocks": "none",
       "sources": [
         "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.patch"
-      ]
+      ],
+      "derivation": "declaration_only",
+      "close_artifact": "re-execute git apply --check, whitespace=error-all and diff --check against the pinned tree inside the gate, or bind the receipt to a verifiable CI artifact"
     },
     {
       "id": "measurement_disabled_build",
@@ -31,6 +35,7 @@
       "sources": [
         "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.RECEIPT.txt"
       ],
+      "derivation": "declaration_only",
       "close_artifact": "CI build with CONFIG_USB_DWC2_R1_MEASURE=n"
     },
     {
@@ -41,6 +46,7 @@
       "sources": [
         "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.RECEIPT.txt"
       ],
+      "derivation": "declaration_only",
       "close_artifact": "CI build with CONFIG_USB_DWC2_R1_MEASURE=y"
     },
     {
@@ -51,6 +57,7 @@
       "sources": [
         "r1a-device/instrumentation/APPLY-GATE.md"
       ],
+      "derivation": "declaration_only",
       "close_artifact": "arm64 build, measurement off and on"
     },
     {
@@ -61,6 +68,7 @@
       "sources": [
         "docs/PENDING.md"
       ],
+      "derivation": "declaration_only",
       "close_artifact": "apply, build and test the exact kernel that will boot"
     },
     {
@@ -71,6 +79,7 @@
       "sources": [
         "r1a-device/instrumentation/APPLY-GATE.md"
       ],
+      "derivation": "checker_executed",
       "close_artifact": "tools/check_functional_semantics.py proving no HW write removed or reordered, no return value changed, no new abort path, no lock or ownership change, and CONFIG=n identical to the original path"
     },
     {
@@ -80,7 +89,8 @@
       "blocks": "evidence_admissibility",
       "sources": [
         "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.patch"
-      ]
+      ],
+      "derivation": "structural_predicate"
     },
     {
       "id": "diagnostic_mmio_excluded",
@@ -89,7 +99,8 @@
       "blocks": "evidence_admissibility",
       "sources": [
         "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.patch"
-      ]
+      ],
+      "derivation": "structural_predicate"
     },
     {
       "id": "timing_perturbation_sensitivity",
@@ -99,6 +110,7 @@
       "sources": [
         "r1a-device/instrumentation/APPLY-GATE.md"
       ],
+      "derivation": "declaration_only",
       "close_artifact": "a measured sensitivity result showing the remaining observer latency does not close the window; until then no NEGATIVE closure is admissible"
     },
     {
@@ -108,7 +120,8 @@
       "blocks": "evidence_admissibility",
       "sources": [
         "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.patch"
-      ]
+      ],
+      "derivation": "structural_predicate"
     },
     {
       "id": "consumer_compatibility",
@@ -118,6 +131,7 @@
       "sources": [
         "r1a-device/instrumentation/APPLY-GATE.md"
       ],
+      "derivation": "adversarial_fixtures",
       "close_artifact": "tools/validate_r1_lifetime_trace.py plus a selftest that rejects diag_build, req_mismatch, map_mismatch, dma_mismatch, missing_event, wrong_order and reset_epoch_mismatch"
     },
     {
@@ -127,7 +141,8 @@
       "blocks": "none",
       "sources": [
         "VERIFY-REPOSITORY.sh"
-      ]
+      ],
+      "derivation": "wiring_inspected"
     },
     {
       "id": "cross_tree_duplicate_census",
@@ -136,7 +151,8 @@
       "blocks": "none",
       "sources": [
         "tools/check_duplicates_full.py"
-      ]
+      ],
+      "derivation": "wiring_inspected"
     },
     {
       "id": "provenance",
@@ -145,7 +161,8 @@
       "blocks": "none",
       "sources": [
         "verify_archive_tracking.py"
-      ]
+      ],
+      "derivation": "wiring_inspected"
     },
     {
       "id": "documentation_sync",
@@ -154,7 +171,8 @@
       "blocks": "none",
       "sources": [
         "verify_status_sync.py"
-      ]
+      ],
+      "derivation": "wiring_inspected"
     },
     {
       "id": "runtime_requirements",
@@ -163,37 +181,41 @@
       "blocks": "none",
       "sources": [
         "docs/PENDING.md"
-      ]
+      ],
+      "derivation": "content_predicate"
     },
     {
       "id": "runtime_execution",
       "review_state": "OPEN",
-      "evidence_state": "NOT_RUN; deliberately does not block run readiness",
+      "evidence_state": "NOT_RUN; a declared token is not a derivation",
       "blocks": "evidence_admissibility",
       "sources": [
         "docs/RUNTIME-STATE.txt"
       ],
-      "close_artifact": "one valid measurement on real DWC2 hardware, recorded as VALID_RUN"
+      "derivation": "declaration_only",
+      "close_artifact": "a run authenticator deriving VALID_RUN from the epoch manifest, hardware qualification and trace validity, not from a declared token"
     },
     {
       "id": "run_epoch_binding",
       "review_state": "OPEN",
-      "evidence_state": "no run yet; when one happens it must be bound to the artifacts that closed readiness",
+      "evidence_state": "two of nine fields actually bound",
       "blocks": "evidence_admissibility",
       "sources": [
         "docs/RUNTIME-STATE.txt"
       ],
-      "close_artifact": "docs/RUN-EPOCH.txt carrying epoch_id, kernel_commit, kernel_build_id, patch_sha256, config_sha256, device and host harness digests, observer_contract and boot_id, with patch and commit matching the instrumentation receipt"
+      "derivation": "partial_binding",
+      "close_artifact": "compare all nine epoch fields against real artifacts; today only patch_sha256 and kernel_commit are bound, the rest are merely present"
     },
     {
       "id": "hypothesis_result",
       "review_state": "OPEN",
-      "evidence_state": "UNDETERMINED; a disproof is a finding, never a gate failure",
+      "evidence_state": "UNDETERMINED; a determined outcome needs an adjudicator, not a word",
       "blocks": "none",
       "sources": [
         "docs/RUNTIME-STATE.txt"
       ],
-      "close_artifact": "any determined outcome, including DISPROVEN or CONFIG_SCOPED_NEGATIVE"
+      "derivation": "declaration_only",
+      "close_artifact": "a result adjudicator deriving the outcome from the trace, so swapping DISPROVEN for PROVEN in a file changes nothing"
     },
     {
       "id": "external_evidence_boundary",
@@ -202,7 +224,8 @@
       "blocks": "none",
       "sources": [
         "docs/PENDING.md"
-      ]
+      ],
+      "derivation": "content_predicate"
     },
     {
       "id": "impact_claim_boundary",
@@ -211,7 +234,8 @@
       "blocks": "none",
       "sources": [
         "docs/IMPACT-ANALYSIS.md"
-      ]
+      ],
+      "derivation": "content_predicate"
     },
     {
       "id": "continuous_enforcement",
@@ -222,6 +246,7 @@
         "external:github-api/main-branch-protection",
         "external:github-api/repository-rulesets"
       ],
+      "derivation": "external_snapshot",
       "close_artifact": "branch protection requiring this gate, evidenced outside these bytes"
     }
   ]

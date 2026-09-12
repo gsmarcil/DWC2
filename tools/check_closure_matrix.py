@@ -35,6 +35,43 @@ BLOCK_KINDS = {'run_readiness', 'evidence_admissibility', 'negative_closure', 'n
 # Policy, not data. v2 let the matrix declare which verdict a row blocked, so a
 # row could be demoted to 'none' and vanish from a verdict without ever being
 # closed. The map is canonical here and the matrix must agree with it.
+# The closing invariant, enforced rather than described:
+#
+#   No PASS may rest solely on a state file, a "receipt=PASS" line, or a
+#   non-empty metadata field. Every PASS must end in an artifact plus an
+#   independent predicate.
+#
+# Each dimension declares what its PASS actually rests on. Rows marked
+# declaration_only are mechanically barred from reading PASS, so a row cannot
+# quietly graduate on an assertion; closing it requires moving it to a derived
+# kind AND writing the predicate that earns it.
+DERIVATION = {
+    'source_pin': 'digest_recomputed',
+    'standalone_apply': 'declaration_only',
+    'measurement_disabled_build': 'declaration_only',
+    'measurement_enabled_build': 'declaration_only',
+    'target_arm64_build': 'declaration_only',
+    'campaign_composition': 'declaration_only',
+    'functional_semantics_preservation': 'checker_executed',
+    'event_ordering': 'structural_predicate',
+    'diagnostic_mmio_excluded': 'structural_predicate',
+    'timing_perturbation_sensitivity': 'declaration_only',
+    'mapping_lineage_design': 'structural_predicate',
+    'consumer_compatibility': 'adversarial_fixtures',
+    'negative_controls': 'wiring_inspected',
+    'cross_tree_duplicate_census': 'wiring_inspected',
+    'provenance': 'wiring_inspected',
+    'documentation_sync': 'wiring_inspected',
+    'runtime_requirements': 'content_predicate',
+    'runtime_execution': 'declaration_only',
+    'run_epoch_binding': 'partial_binding',
+    'hypothesis_result': 'declaration_only',
+    'external_evidence_boundary': 'content_predicate',
+    'impact_claim_boundary': 'content_predicate',
+    'continuous_enforcement': 'external_snapshot',
+}
+DECLARATION_ONLY = {'declaration_only', 'partial_binding'}
+
 EXPECTED_BLOCKS = {
     'measurement_disabled_build': 'run_readiness',
     'measurement_enabled_build': 'run_readiness',
@@ -143,7 +180,11 @@ def compute_states(root: Path):
     states['source_pin'] = 'PASS' if (
         receipt.get('kernel_pin') == EXPECTED_KERNEL_PIN and
         receipt.get('patch_sha256') == sha256(root / PATCH_PATH)) else 'FAIL'
-    states['standalone_apply'] = 'PASS' if all(
+    # Was PASS from three receipt lines, with no apply re-executed. Under the
+    # closing invariant a receipt line is not a derivation, so this can only be
+    # OPEN until an apply is re-run against the pinned tree, or the receipt is
+    # bound to a verifiable CI artifact.
+    states['standalone_apply'] = 'OPEN' if all(
         receipt.get(k) == 'PASS' for k in
         ('standalone_apply_to_pin', 'whitespace_error_all', 'diff_check')) else 'FAIL'
     states['measurement_disabled_build'] = state_from_receipt(receipt.get('build_measurement_disabled'))
@@ -350,7 +391,10 @@ def compute_states(root: Path):
     if hypothesis not in ALLOWED_HYPOTHESIS:
         errors.append(f'invalid hypothesis_result: {hypothesis!r}')
         hypothesis = 'UNDETERMINED'
-    states['runtime_execution'] = {'NOT_RUN': 'OPEN', 'VALID_RUN': 'PASS',
+    # VALID_RUN asserted in a text file is a declaration, not a derivation, so
+    # it can only hold the row OPEN. An INVALID_RUN still fails, because a
+    # self-declared failure needs no corroboration to be believed.
+    states['runtime_execution'] = {'NOT_RUN': 'OPEN', 'VALID_RUN': 'OPEN',
                                    'INVALID_RUN': 'FAIL'}[runtime_state]
     # The result axis is never a gate failure. An undetermined hypothesis is an
     # open question, and a disproof is a finding, not a defect.
@@ -358,6 +402,11 @@ def compute_states(root: Path):
     # text file could declare the hypothesis proven. The outcome must be
     # consistent with the run that produced it, and admissibility is checked by
     # the matrix layer, not asserted here.
+    # Consistency with the run is necessary but not sufficient. Swapping
+    # DISPROVEN for PROVEN in a text file must not move this row, so a
+    # determined outcome stays OPEN until an adjudicator derives it from the
+    # trace. The consistency check below is kept because it still catches
+    # incoherent pairs.
     if hypothesis == 'UNDETERMINED':
         states['hypothesis_result'] = 'OPEN'
     elif runtime_state != 'VALID_RUN':
@@ -365,7 +414,7 @@ def compute_states(root: Path):
                       f'=VALID_RUN, got {runtime_state}')
         states['hypothesis_result'] = 'FAIL'
     else:
-        states['hypothesis_result'] = 'PASS'
+        states['hypothesis_result'] = 'OPEN'
 
     # Epoch binding: the run must be tied to the artifacts that closed readiness,
     # or gates closed later could retroactively bless an older kernel.
@@ -376,6 +425,10 @@ def compute_states(root: Path):
     states['run_epoch_binding'] = 'OPEN'
     if epoch.is_file():
         rec = parse_receipt(epoch.read_text(encoding='utf-8'))
+        # Only patch_sha256 and kernel_commit are bound to anything. The rest
+        # are required to be present but are not yet compared to an artifact,
+        # which is why this row's derivation kind is partial_binding and it
+        # cannot read PASS under the closing invariant.
         missing = [f for f in EPOCH_FIELDS if not rec.get(f)]
         if missing:
             errors.append('run epoch missing fields: ' + ', '.join(missing))
@@ -387,7 +440,7 @@ def compute_states(root: Path):
             errors.append('run epoch kernel_commit is not the pinned kernel')
             states['run_epoch_binding'] = 'FAIL'
         else:
-            states['run_epoch_binding'] = 'PASS'
+            states['run_epoch_binding'] = 'OPEN'
     elif runtime_state != 'NOT_RUN':
         errors.append('a run is declared but docs/RUN-EPOCH.txt is absent')
         states['run_epoch_binding'] = 'FAIL'
@@ -420,8 +473,8 @@ def validate_matrix(root: Path, matrix_path: Path = MATRIX_PATH):
     except Exception as exc:
         return [f'invalid matrix JSON: {exc}']
 
-    if data.get('schema_version') != 3:
-        errors.append(f"schema_version must be 3, got {data.get('schema_version')!r}")
+    if data.get('schema_version') != 4:
+        errors.append(f"schema_version must be 4, got {data.get('schema_version')!r}")
     if not isinstance(data.get('contract_id'), str) or not data['contract_id'].strip():
         errors.append('contract_id must be a non-empty string')
 
@@ -474,6 +527,14 @@ def validate_matrix(root: Path, matrix_path: Path = MATRIX_PATH):
                     continue
                 elif not (root / src).exists():
                     errors.append(f'{ident}: source does not exist: {src}')
+        kind = DERIVATION.get(ident)
+        if kind is None:
+            errors.append(f'{ident}: no derivation kind declared')
+        elif declared == 'PASS' and kind in DECLARATION_ONLY:
+            errors.append(
+                f'{ident}: PASS rests on {kind}; a state file, a receipt line or a '
+                f'metadata field is not a derivation. Close it with an artifact and '
+                f'an independent predicate, and move its derivation kind.')
         if declared == 'OPEN' and not (isinstance(dim.get('close_artifact'), str) and dim['close_artifact'].strip()):
             errors.append(f'{ident}: OPEN requires close_artifact')
         if declared == 'FAIL' and not (isinstance(dim.get('blocker'), str) and dim['blocker'].strip()):
@@ -536,7 +597,7 @@ def run(root: Path) -> int:
 
 def fixture_matrix(states=None) -> dict:
     base = {
-        'source_pin': 'PASS', 'standalone_apply': 'PASS',
+        'source_pin': 'PASS', 'standalone_apply': 'OPEN',
         'measurement_disabled_build': 'OPEN', 'measurement_enabled_build': 'OPEN',
         'target_arm64_build': 'OPEN', 'campaign_composition': 'OPEN',
         'functional_semantics_preservation': 'OPEN', 'event_ordering': 'PASS',
@@ -570,7 +631,7 @@ def fixture_matrix(states=None) -> dict:
     run_ok = rows_pass('run_readiness')
     evid_ok = run_ok and rows_pass('evidence_admissibility')
     neg_ok = evid_ok and rows_pass('negative_closure')
-    return {'schema_version': 3, 'contract_id': 'fixture-v3',
+    return {'schema_version': 4, 'contract_id': 'fixture-v4',
             'run_readiness': 'READY' if run_ok else 'BLOCKED',
             'evidence_admissibility': 'READY' if evid_ok else 'BLOCKED',
             'negative_closure_admissibility': 'READY' if neg_ok else 'BLOCKED',
@@ -758,10 +819,9 @@ def selftest() -> int:
             'runtime_execution=VALID_RUN\nhypothesis_result=DISPROVEN\n')
         write_epoch(r)
         p = r / MATRIX_PATH
-        d = fixture_matrix({'runtime_execution': 'PASS', 'hypothesis_result': 'PASS',
-                            'run_epoch_binding': 'PASS'})
+        d = fixture_matrix()
         p.write_text(json.dumps(d))
-    expect('a valid run that disproves the hypothesis is a PASS',
+    expect('a declared VALID_RUN alone does not close the execution row',
            valid_run_reaches_pass, True)
 
     def invalid_run_is_fail(r):
@@ -769,7 +829,7 @@ def selftest() -> int:
             'runtime_execution=INVALID_RUN\nhypothesis_result=UNDETERMINED\n')
         write_epoch(r)
         p = r / MATRIX_PATH
-        d = fixture_matrix({'runtime_execution': 'FAIL', 'run_epoch_binding': 'PASS'})
+        d = fixture_matrix({'runtime_execution': 'FAIL'})
         for x in d['dimensions']:
             if x['id'] == 'runtime_execution':
                 x['blocker'] = 'invalid run'
@@ -898,6 +958,47 @@ def selftest() -> int:
         (r / PATCH_PATH).write_text(bad); _rehash(r)
     expect('lineage named but never assigned is rejected',
            lineage_named_not_assigned, False)
+
+    def declaration_only_cannot_pass(r):
+        p = r / MATRIX_PATH; d = json.loads(p.read_text())
+        for x in d['dimensions']:
+            if x['id'] == 'standalone_apply':
+                x['review_state'] = 'PASS'; x.pop('close_artifact', None)
+        p.write_text(json.dumps(d))
+    expect('a declaration-only row may not read PASS',
+           declaration_only_cannot_pass, False)
+
+    def swapping_the_result_word_changes_nothing(r):
+        write_epoch(r)
+        (r / 'docs/RUNTIME-STATE.txt').write_text(
+            'runtime_execution=VALID_RUN\nhypothesis_result=PROVEN\n')
+        p = r / MATRIX_PATH
+        d = fixture_matrix()
+        p.write_text(json.dumps(d))
+    expect('PROVEN in a text file does not close the result row',
+           swapping_the_result_word_changes_nothing, True)
+
+    def epoch_placeholders_do_not_pass(r):
+        write_epoch(r)
+        (r / 'docs/RUNTIME-STATE.txt').write_text(
+            'runtime_execution=VALID_RUN\nhypothesis_result=UNDETERMINED\n')
+        p = r / MATRIX_PATH; d = json.loads(p.read_text())
+        for x in d['dimensions']:
+            if x['id'] == 'run_epoch_binding':
+                x['review_state'] = 'PASS'; x.pop('close_artifact', None)
+            if x['id'] == 'runtime_execution':
+                x['review_state'] = 'PASS'; x.pop('close_artifact', None)
+        p.write_text(json.dumps(d))
+    expect('partially bound epoch fields may not read PASS',
+           epoch_placeholders_do_not_pass, False)
+
+    def unknown_derivation_kind(r):
+        p = r / MATRIX_PATH; d = json.loads(p.read_text())
+        d['dimensions'].append({'id': 'source_pin', 'review_state': 'PASS',
+                                'evidence_state': 'dup', 'blocks': 'none',
+                                'sources': ['STATUS.md']})
+        p.write_text(json.dumps(d))
+    expect('duplicate dimension rejected', unknown_derivation_kind, False)
 
     if failures:
         print(f'CLOSURE_MATRIX_SELFTEST: FAIL ({failures})', file=sys.stderr)
