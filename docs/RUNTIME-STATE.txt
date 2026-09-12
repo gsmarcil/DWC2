@@ -1,0 +1,12 @@
+# Runtime execution and hypothesis outcome are separate axes.
+#
+# runtime_execution says whether a VALID measurement was performed.
+# hypothesis_result says what it found. A valid run that disproves the
+# hypothesis is a PASS for execution and a DISPROVEN for the result. Treating a
+# disproof as a gate failure would bias the whole apparatus toward finding a bug.
+#
+# runtime_execution : NOT_RUN | VALID_RUN | INVALID_RUN
+# hypothesis_result : UNDETERMINED | PROVEN | DISPROVEN | CONFIG_SCOPED_NEGATIVE
+
+runtime_execution=NOT_RUN
+hypothesis_result=UNDETERMINED
