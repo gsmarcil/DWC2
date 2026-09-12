@@ -306,6 +306,34 @@ do
     rm -f "$dup_tmp"
 done
 
+# 6c. Closure matrix.
+#
+# One declaration of every dimension that gates the campaign, compared against
+# what the repository actually computes. A dimension cannot be called PASS while
+# its receipt says NOT_RUN, and the campaign cannot read READY while any
+# blocking dimension is OPEN. Closing an open item makes the matrix stale and
+# turns the gate red until the matrix is updated deliberately.
+for spec in \
+    'closure_matrix_selftest:selftest' \
+    'closure_matrix:.'
+do
+    label=${spec%%:*}
+    arg=${spec#*:}
+    if [ ! -f tools/check_closure_matrix.py ]; then
+        failmsg "$label"
+        printf '  missing: tools/check_closure_matrix.py\n' >&2
+        continue
+    fi
+    cm_tmp=${TMPDIR:-/tmp}/dwc2-$label.$$
+    if python3 tools/check_closure_matrix.py "$arg" >"$cm_tmp" 2>&1; then
+        pass "$label"
+    else
+        failmsg "$label"
+        sed 's/^/  /' "$cm_tmp" >&2
+    fi
+    rm -f "$cm_tmp"
+done
+
 # 7. Status-document drift guard.
 #
 # Freeze the verdict of the evidence checks (1-6) before the guard runs.  The

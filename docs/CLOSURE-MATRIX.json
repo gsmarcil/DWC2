@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "contract_id": "dwc2-r1a-closure-v1",
+  "campaign_admissibility": "BLOCKED",
+  "dimensions": [
+    {
+      "id": "source_pin",
+      "review_state": "PASS",
+      "evidence_state": "patch bound to f5a7e2ae and its own digest",
+      "blocks_campaign": false,
+      "sources": [
+        "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.RECEIPT.txt"
+      ]
+    },
+    {
+      "id": "standalone_apply",
+      "review_state": "PASS",
+      "evidence_state": "applies to the pin, whitespace and diff --check clean",
+      "blocks_campaign": false,
+      "sources": [
+        "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.patch"
+      ]
+    },
+    {
+      "id": "measurement_disabled_build",
+      "review_state": "OPEN",
+      "evidence_state": "NOT_RUN: no kernel tree or toolchain here",
+      "blocks_campaign": true,
+      "sources": [
+        "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.RECEIPT.txt"
+      ],
+      "close_artifact": "CI build of the pin with CONFIG_USB_DWC2_R1_MEASURE=n, receipt line set to PASS"
+    },
+    {
+      "id": "measurement_enabled_build",
+      "review_state": "OPEN",
+      "evidence_state": "NOT_RUN: no kernel tree or toolchain here",
+      "blocks_campaign": true,
+      "sources": [
+        "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.RECEIPT.txt"
+      ],
+      "close_artifact": "CI build with CONFIG_USB_DWC2_R1_MEASURE=y, receipt line set to PASS"
+    },
+    {
+      "id": "target_arm64_build",
+      "review_state": "OPEN",
+      "evidence_state": "UNVERIFIED: CI built x86_64 only; target is Cortex-A53",
+      "blocks_campaign": true,
+      "sources": [
+        "r1a-device/instrumentation/APPLY-GATE.md"
+      ],
+      "close_artifact": "arm64 build with measurement off and on; criterion_5_arm64_build=PASS"
+    },
+    {
+      "id": "campaign_composition",
+      "review_state": "OPEN",
+      "evidence_state": "UNVERIFIED: v5 tested standalone, not stacked with the ABI=9 observer",
+      "blocks_campaign": true,
+      "sources": [
+        "docs/PENDING.md",
+        "r1a-device/instrumentation/APPLY-GATE.md"
+      ],
+      "close_artifact": "apply, build and semantically test the exact kernel that will boot; criterion_4=PASS"
+    },
+    {
+      "id": "behavior_preservation",
+      "review_state": "OPEN",
+      "evidence_state": "no receipt line yet; the patch must be shown not to alter driver behaviour",
+      "blocks_campaign": true,
+      "sources": [
+        "r1a-device/instrumentation/APPLY-GATE.md"
+      ],
+      "close_artifact": "add criterion_6_behavior_preservation to the receipt, evidenced by a measured comparison"
+    },
+    {
+      "id": "event_ordering",
+      "review_state": "PASS",
+      "evidence_state": "EPDIS_WRITTEN after the write; PROGRAMMED split",
+      "blocks_campaign": false,
+      "sources": [
+        "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.patch"
+      ]
+    },
+    {
+      "id": "observer_nonperturbation",
+      "review_state": "PASS",
+      "evidence_state": "MMIO compiled out of the decisive build; records carry a build flag",
+      "blocks_campaign": false,
+      "sources": [
+        "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.patch"
+      ]
+    },
+    {
+      "id": "mapping_lineage_design",
+      "review_state": "PASS",
+      "evidence_state": "request, map and dma identity carried from MAP through UNMAP_DONE",
+      "blocks_campaign": false,
+      "sources": [
+        "r1a-device/instrumentation/R1A-RESET-INSTRUMENTATION-v5.patch"
+      ]
+    },
+    {
+      "id": "consumer_compatibility",
+      "review_state": "OPEN",
+      "evidence_state": "no consumer exists that rejects diagnostic traces and checks lineage",
+      "blocks_campaign": true,
+      "sources": [
+        "r1a-device/instrumentation/APPLY-GATE.md"
+      ],
+      "close_artifact": "tools/validate_r1_lifetime_trace.py plus its selftest, both wired into the gate"
+    },
+    {
+      "id": "negative_controls",
+      "review_state": "PASS",
+      "evidence_state": "every checker in the gate carries discriminating controls",
+      "blocks_campaign": false,
+      "sources": [
+        "VERIFY-REPOSITORY.sh"
+      ]
+    },
+    {
+      "id": "cross_tree_duplicate_census",
+      "review_state": "PASS",
+      "evidence_state": "full census across the three trees, overlay declared",
+      "blocks_campaign": false,
+      "sources": [
+        "tools/check_duplicates_full.py",
+        "DUPLICATES-OVERLAY.txt"
+      ]
+    },
+    {
+      "id": "provenance",
+      "review_state": "PASS",
+      "evidence_state": "archive tracking proof runs in both modes",
+      "blocks_campaign": false,
+      "sources": [
+        "verify_archive_tracking.py",
+        "baseline/SHA256SUMS"
+      ]
+    },
+    {
+      "id": "documentation_sync",
+      "review_state": "PASS",
+      "evidence_state": "declared gate state compared against the computed verdict",
+      "blocks_campaign": false,
+      "sources": [
+        "verify_status_sync.py"
+      ]
+    },
+    {
+      "id": "runtime_requirements",
+      "review_state": "PASS",
+      "evidence_state": "target properties and artifact chain stated",
+      "blocks_campaign": false,
+      "sources": [
+        "docs/PENDING.md"
+      ]
+    },
+    {
+      "id": "runtime_execution",
+      "review_state": "OPEN",
+      "evidence_state": "R1A has not been run on real DWC2 hardware",
+      "blocks_campaign": true,
+      "sources": [
+        "STATUS.md"
+      ],
+      "close_artifact": "one valid attempt on a real DWC2 gadget UDC producing the P3 artifact chain"
+    },
+    {
+      "id": "external_evidence_boundary",
+      "review_state": "PASS",
+      "evidence_state": "Fuchsia and usbliter8 bounded; K_hw left UNDETERMINED",
+      "blocks_campaign": false,
+      "sources": [
+        "docs/PENDING.md"
+      ]
+    },
+    {
+      "id": "impact_claim_boundary",
+      "review_state": "PASS",
+      "evidence_state": "impact analysis names its own closure gate as UNKNOWN",
+      "blocks_campaign": false,
+      "sources": [
+        "docs/IMPACT-ANALYSIS.md"
+      ]
+    },
+    {
+      "id": "continuous_enforcement",
+      "review_state": "OPEN",
+      "evidence_state": "the repository cannot prove from its own bytes that CI is required to merge",
+      "blocks_campaign": false,
+      "sources": [
+        "VERIFY-REPOSITORY.sh"
+      ],
+      "close_artifact": "branch protection requiring the gate check, evidenced outside these bytes"
+    }
+  ]
+}
